@@ -1,0 +1,13 @@
+/server/node_modules
+/client/node_modules
+/server/.env
+/client/.env
+/server/greenlock.d
+/server/.greenlock
+/server/logs
+/server/data
+/server/tmp
+/server/cache
+/server/certs
+/server/keys
+/server/certs

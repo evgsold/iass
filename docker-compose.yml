@@ -1,0 +1,105 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:13-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: iaas_platform
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 50
+
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      PORT: 5000
+      HOST: 0.0.0.0
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      JWT_SECRET: ${JWT_SECRET}
+      SSH_KEY_PATH: /app/server/.ssh/id_rsa
+      NODE_ENV: development
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5001:5000"
+    volumes:
+      - ./server/.ssh:/app/server/.ssh:ro
+      # ✅ Пробрасываем Docker socket (для macOS Docker Desktop)
+      - /var/run/docker.sock:/var/run/docker.sock
+      # ✅ Папка для ВМ должна быть доступна Docker Desktop
+      - ./vms:/tmp/vms
+    networks:
+      - app-network
+
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      REACT_APP_API_BASE_URL: http://localhost:5001/api
+      PORT: 3000
+      HOST: 0.0.0.0
+      WDS_SOCKET_HOST: 0.0.0.0
+      CHOKIDAR_USEPOLLING: "true"
+      WATCHPACK_POLLING: "true"
+      NODE_ENV: development
+    ports:
+      - "3001:80"
+    depends_on:
+      - server
+    networks:
+      - app-network
+
+  proxy:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    restart: always
+    command: npm run proxy
+    environment:
+      PORT: 80
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      API_SERVICE_URL: http://server:5000
+      FRONTEND_SERVICE_URL: http://client:80
+      VM_HOST: host.docker.internal
+      NODE_ENV: production
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./server/greenlock.d:/app/server/greenlock.d
+      - ./server/.greenlock:/app/server/.greenlock
+    depends_on:
+      - server
+      - client
+    networks:
+      - app-network
+
+volumes:
+  pgdata:
+
+networks:
+  app-network:
+    driver: bridge

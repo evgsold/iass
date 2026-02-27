@@ -1,0 +1,32 @@
+{
+  "name": "nextjs-cloud-backend",
+  "version": "1.0.0",
+  "description": "Next.js Cloud Platform Backend",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "proxy": "node proxy.js",
+    "dev": "nodemon index.js",
+    "init": "bash init.sh"
+  },
+  "dependencies": {
+    "axios": "^1.13.5",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.5",
+    "dockerode": "^4.0.9",
+    "dotenv": "^17.3.1",
+    "express": "^4.18.2",
+    "greenlock-express": "^4.0.3",
+    "http-proxy": "^1.18.1",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.18.0",
+    "pg-hstore": "^2.3.4",
+    "sequelize": "^6.37.7",
+    "socket.io": "^4.8.3",
+    "ssh2": "^1.14.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
