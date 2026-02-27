@@ -41,19 +41,37 @@ const app = async (req, res) => {
 
     // Handle main domain (Frontend)
     if (host === baseDomain || host === `www.${baseDomain}`) {
-        proxy.web(req, res, { target: config.FRONTEND_SERVICE_URL });
+        proxy.web(req, res, { target: config.FRONTEND_SERVICE_URL }, (err) => {
+            logger.error(`Proxy error for Frontend:`, err.message);
+            if (!res.headersSent) {
+                res.writeHead(502);
+                res.end('Bad Gateway: Frontend not reachable');
+            }
+        });
         return;
     }
 
     // Handle API subdomain
     if (subdomain === 'api') {
-        proxy.web(req, res, { target: config.API_SERVICE_URL });
+        proxy.web(req, res, { target: config.API_SERVICE_URL }, (err) => {
+            logger.error(`Proxy error for API:`, err.message);
+            if (!res.headersSent) {
+                res.writeHead(502);
+                res.end('Bad Gateway: API not reachable');
+            }
+        });
         return;
     }
 
     // Handle Dashboard subdomain (optional, if you want dashboard.domain.com)
     if (subdomain === 'dashboard') {
-        proxy.web(req, res, { target: config.FRONTEND_SERVICE_URL });
+        proxy.web(req, res, { target: config.FRONTEND_SERVICE_URL }, (err) => {
+            logger.error(`Proxy error for Dashboard:`, err.message);
+            if (!res.headersSent) {
+                res.writeHead(502);
+                res.end('Bad Gateway: Dashboard not reachable');
+            }
+        });
         return;
     }
 
