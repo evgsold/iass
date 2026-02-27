@@ -4,6 +4,7 @@ const Project = require('./Project');
 const ProjectUser = require('./ProjectUser');
 const VM = require('./VM');
 const ResourceLog = require('./ResourceLog');
+const Backup = require('./Backup');
 
 // Relations
 User.hasMany(Project, { foreignKey: 'ownerId', as: 'ownedProjects' });
@@ -25,6 +26,9 @@ VM.belongsTo(Project, { foreignKey: 'projectId', as: 'project' });
 VM.hasMany(ResourceLog, { foreignKey: 'vmId', as: 'resourceLogs' });
 ResourceLog.belongsTo(VM, { foreignKey: 'vmId', as: 'vm' });
 
+VM.hasMany(Backup, { foreignKey: 'vmId', as: 'backups' });
+Backup.belongsTo(VM, { foreignKey: 'vmId', as: 'vm' });
+
 module.exports = {
     sequelize,
     connectDB,
@@ -32,5 +36,6 @@ module.exports = {
     Project,
     ProjectUser,
     VM,
-    ResourceLog
+    ResourceLog,
+    Backup
 };

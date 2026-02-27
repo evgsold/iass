@@ -28,7 +28,16 @@ const corsOptions = {
             'http://localhost:3001',
             'http://127.0.0.1:3000',
             'http://127.0.0.1:3001',
-            'https://yourdomain.com' // Без пробелов в конце!
+            'https://iaasapp.pro',
+            'https://*.iaasapp.pro',
+            'https://104.248.205.79',
+            'https://104.248.205.79:3000',
+            'https://104.248.205.79:3001',
+            'https://*.104.248.205.79',
+            'http://104.248.205.79',
+            'http://104.248.205.79:3000',
+            'http://104.248.205.79:3001',
+            'http://*.104.248.205.79',
         ];
         
         if (allowedOrigins.indexOf(origin) !== -1) {
@@ -186,6 +195,66 @@ app.get('/api/vms/:id', authMiddleware, async (req, res) => {
     }
 });
 
+// --- Backup Routes ---
+    app.post('/api/vms/:id/backups', authMiddleware, async (req, res) => {
+        try {
+            const { name } = req.body;
+            const vm = await vmManager.getVM(req.params.id);
+            if (!vm) return res.status(404).json({ error: 'ВМ не найдена' });
+            
+            await projectService.getProject(vm.projectId, req.user.id);
+            
+            const backup = await vmManager.createBackup(vm.id, name, vm.projectId);
+            res.status(201).json(backup);
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    app.get('/api/vms/:id/backups', authMiddleware, async (req, res) => {
+        try {
+            const vm = await vmManager.getVM(req.params.id);
+            if (!vm) return res.status(404).json({ error: 'ВМ не найдена' });
+            
+            await projectService.getProject(vm.projectId, req.user.id);
+            
+            const backups = await vmManager.getBackups(vm.id, vm.projectId);
+            res.json(backups);
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    app.post('/api/vms/:id/restore/:backupId', authMiddleware, async (req, res) => {
+        try {
+            const vm = await vmManager.getVM(req.params.id);
+            if (!vm) return res.status(404).json({ error: 'ВМ не найдена' });
+            
+            await projectService.getProject(vm.projectId, req.user.id);
+            
+            await vmManager.restoreBackup(vm.id, req.params.backupId, vm.projectId);
+            res.json({ message: 'ВМ восстановлена из бекапа' });
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    // --- Resize Route ---
+    app.post('/api/vms/:id/resize', authMiddleware, async (req, res) => {
+        try {
+            const { ram, cpu } = req.body;
+            const vm = await vmManager.getVM(req.params.id);
+            if (!vm) return res.status(404).json({ error: 'ВМ не найдена' });
+            
+            await projectService.getProject(vm.projectId, req.user.id);
+            
+            const updatedVM = await vmManager.resizeVM(vm.id, parseInt(ram), parseInt(cpu), vm.projectId);
+            res.json(updatedVM);
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    });
+
 // VM Actions
 app.post('/api/vms/:id/:action', authMiddleware, async (req, res) => {
     try {
@@ -220,7 +289,8 @@ app.post('/api/vms/:id/:action', authMiddleware, async (req, res) => {
     }
 });
 
-app.delete('/api/vms/:id', authMiddleware, async (req, res) => {
+
+    app.delete('/api/vms/:id', authMiddleware, async (req, res) => {
     try {
         const vm = await vmManager.getVM(req.params.id);
         if (!vm) return res.status(404).json({ error: 'ВМ не найдена' });

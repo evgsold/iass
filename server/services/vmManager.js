@@ -8,7 +8,7 @@ const logger = require('../utils/logger');
 const hypervisor = require('./hypervisor');
 const cloudinit = require('./cloudinit');
 const ssh = require('./ssh');
-const { VM, Project, ResourceLog } = require('../models');
+const { VM, Project, ResourceLog, Backup } = require('../models');
 
 const { exec } = require('child_process');
 
@@ -536,6 +536,180 @@ class VMManager {
             maxRam: Math.max(...ramValues),
             samples: logs.length
         };
+    }
+
+    /**
+     * Создать бекап ВМ
+     */
+    async createBackup(vmId, name, projectId = null) {
+        const vm = await this.getVM(vmId, projectId);
+        if (!vm) {
+            throw new Error('ВМ не найдена или доступ запрещен');
+        }
+
+        if (config.MODE !== 'docker') {
+            throw new Error('Бекапы поддерживаются только в режиме Docker');
+        }
+
+        const backupName = `backup-${vm.name}-${Date.now()}`;
+        const backupDir = path.join(config.VM_STORAGE_DIR || '/tmp/vms', '../backups');
+        
+        if (!fs.existsSync(backupDir)) {
+            fs.mkdirSync(backupDir, { recursive: true });
+        }
+
+        const volumeArchiveName = `${backupName}.tar.gz`;
+        const volumePath = path.join(backupDir, volumeArchiveName);
+        const diskPath = path.join(config.VM_STORAGE_DIR || '/tmp/vms', vm.name);
+        
+        const backup = await Backup.create({
+            vmId: vm.id,
+            name: name || `Backup ${new Date().toLocaleString()}`,
+            imageTag: backupName,
+            volumePath: volumePath,
+            status: 'creating'
+        });
+
+        try {
+            // 1. Create Docker Image Backup
+            await hypervisor.createBackup(vm.name, backupName);
+            
+            // 2. Create Volume Backup (tar.gz)
+            if (fs.existsSync(diskPath)) {
+                logger.info(`Creating volume backup for ${vm.name}...`);
+                await new Promise((resolve, reject) => {
+                    exec(`tar -czf "${volumePath}" -C "${diskPath}" .`, (err) => {
+                        if (err) reject(err);
+                        else resolve();
+                    });
+                });
+                logger.success(`Volume backup created: ${volumePath}`);
+            }
+
+            await backup.update({ status: 'ready' });
+            return backup;
+        } catch (e) {
+            await backup.update({ status: 'error' });
+            logger.error(`Backup failed: ${e.message}`);
+            throw e;
+        }
+    }
+
+    /**
+     * Получить список бекапов
+     */
+    async getBackups(vmId, projectId = null) {
+        const vm = await this.getVM(vmId, projectId);
+        if (!vm) {
+            throw new Error('ВМ не найдена или доступ запрещен');
+        }
+
+        return await Backup.findAll({
+            where: { vmId },
+            order: [['createdAt', 'DESC']]
+        });
+    }
+
+    /**
+     * Восстановить из бекапа
+     */
+    async restoreBackup(vmId, backupId, projectId = null) {
+        const vm = await this.getVM(vmId, projectId);
+        if (!vm) throw new Error('ВМ не найдена');
+
+        const backup = await Backup.findByPk(backupId);
+        if (!backup || backup.vmId !== vmId) throw new Error('Бекап не найден');
+
+        if (config.MODE !== 'docker') throw new Error('Только Docker режим');
+
+        logger.info(`Восстановление ВМ ${vm.name} из бекапа ${backup.name}`);
+
+        // 1. Stop VM
+        try {
+            await this.stopVM(vmId, projectId);
+        } catch (e) {
+            // Ignore if already stopped
+        }
+
+        // 2. Delete current container (keep volume logic handled below)
+        try {
+            await hypervisor.ensureConnection();
+            const container = hypervisor.docker.getContainer(vm.name);
+            await container.remove({ force: true });
+        } catch (e) {
+            if (e.statusCode !== 404 && !e.message.includes('No such container')) {
+                logger.warn(`Ошибка при удалении контейнера для восстановления: ${e.message}`);
+            }
+        }
+
+        const diskPath = path.join(config.VM_STORAGE_DIR || '/tmp/vms', vm.name);
+
+        // 3. Restore Volume Data
+        if (backup.volumePath && fs.existsSync(backup.volumePath)) {
+            logger.info(`Restoring volume data from ${backup.volumePath}...`);
+            
+            // Clean current disk
+            if (fs.existsSync(diskPath)) {
+                fs.rmSync(diskPath, { recursive: true, force: true });
+                fs.mkdirSync(diskPath, { recursive: true });
+            } else {
+                fs.mkdirSync(diskPath, { recursive: true });
+            }
+
+            // Extract archive
+            await new Promise((resolve, reject) => {
+                exec(`tar -xzf "${backup.volumePath}" -C "${diskPath}"`, (err) => {
+                    if (err) reject(err);
+                    else resolve();
+                });
+            });
+            logger.success(`Volume data restored.`);
+        }
+
+        // 4. Update VM config to use backup image
+        await vm.update({ dockerImage: backup.imageTag, type: 'docker' });
+
+        // 5. Recreate VM
+        await hypervisor.createVM({
+            name: vm.name,
+            type: 'docker', // Treat as generic docker container now since we use custom image
+            dockerImage: backup.imageTag,
+            framework: vm.framework,
+            ram: vm.ram,
+            cpu: vm.cpu,
+            diskPath,
+            hostPort: vm.hostPort,
+            network: config.VM_NETWORK || 'default'
+        });
+
+        await vm.update({ status: 'running' });
+        return true;
+    }
+
+    /**
+     * Изменить ресурсы ВМ
+     */
+    async resizeVM(vmId, ram, cpu, projectId = null) {
+        const vm = await this.getVM(vmId, projectId);
+        if (!vm) throw new Error('ВМ не найдена');
+
+        logger.info(`Изменение ресурсов ВМ ${vm.name}: RAM ${ram}MB, CPU ${cpu}`);
+
+        // Update DB
+        await vm.update({ ram, cpu });
+
+        if (config.MODE === 'docker') {
+            // Try dynamic update
+            try {
+                await hypervisor.updateContainerResources(vm.name, ram, cpu);
+            } catch (e) {
+                logger.warn(`Не удалось обновить ресурсы на лету, требуется перезагрузка: ${e.message}`);
+                // Optional: Force restart if dynamic update fails?
+                // For now, just warn.
+            }
+        }
+        
+        return vm;
     }
 
     /**

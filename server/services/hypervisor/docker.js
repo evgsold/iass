@@ -65,7 +65,7 @@ class DockerService {
         await this.ensureConnection();
         
         let imageName;
-        let cmd = ['sh', '-c', 'while :; do sleep 1; done'];
+        let cmd = undefined;
         let privileged = false;
         let env = [];
 
@@ -74,20 +74,31 @@ class DockerService {
             cmd = ['server', '--disable-agent'];
             privileged = true;
             env = ['K3S_KUBECONFIG_OUTPUT=/output/kubeconfig.yaml', 'K3S_KUBECONFIG_MODE=666'];
-        } else if (vmConfig.type === 'docker') {
-            imageName = vmConfig.dockerImage || 'ubuntu:latest';
-            if (imageName.includes('ubuntu') || imageName.includes('alpine') || imageName.includes('debian') || imageName.includes('centos')) {
-                 cmd = ['sh', '-c', 'while :; do sleep 1; done'];
+        } else if (vmConfig.type === 'app') {
+            // App VMs always need to stay alive for manual start
+            cmd = ['sh', '-c', 'while :; do sleep 1; done'];
+            if (vmConfig.dockerImage) {
+                imageName = vmConfig.dockerImage;
             } else {
-                 cmd = undefined; 
+                const frameworks = {
+                    'node': 'node:18',
+                    'python': 'python:3.10',
+                    'go': 'golang:1.21'
+                };
+                imageName = frameworks[vmConfig.framework] || 'node:18';
             }
         } else {
-            const frameworks = {
-                'node': 'node:18',
-                'python': 'python:3.10',
-                'go': 'golang:1.21'
-            };
-            imageName = frameworks[vmConfig.framework] || 'node:18';
+            // Docker type
+            if (vmConfig.dockerImage) {
+                imageName = vmConfig.dockerImage;
+                // Only override CMD if it looks like a base OS image that would exit immediately
+                if (imageName.match(/^(ubuntu|alpine|debian|centos)(:|$)/)) {
+                    cmd = ['sh', '-c', 'while :; do sleep 1; done'];
+                }
+            } else {
+                imageName = 'ubuntu:latest';
+                cmd = ['sh', '-c', 'while :; do sleep 1; done'];
+            }
         }
         
         // Проверяем и скачиваем образ через API
@@ -126,6 +137,7 @@ class DockerService {
             name: vmConfig.name,
             Cmd: cmd,
             Env: env,
+            Tty: true, // Включаем TTY для корректного отображения логов
             HostConfig: {
                 PortBindings: {
                     '3000/tcp': [{ HostPort: String(vmConfig.hostPort) }],
@@ -136,6 +148,16 @@ class DockerService {
                 Privileged: privileged,
                 RestartPolicy: {
                     Name: 'unless-stopped'
+                },
+                // Set resource limits if provided
+                ...(vmConfig.ram ? { Memory: vmConfig.ram * 1024 * 1024 } : {}),
+                ...(vmConfig.cpu ? { NanoCpus: vmConfig.cpu * 1000000000 } : {}),
+                LogConfig: {
+                    Type: 'json-file',
+                    Config: {
+                        'max-size': '10m',
+                        'max-file': '3'
+                    }
                 }
             },
             WorkingDir: '/app'
@@ -242,6 +264,64 @@ class DockerService {
         }
     }
 
+    async updateContainerResources(vmName, ramMB, cpuCores) {
+        await this.ensureConnection();
+        try {
+            const container = this.docker.getContainer(vmName);
+            const updateConfig = {};
+            
+            if (ramMB) {
+                updateConfig.Memory = ramMB * 1024 * 1024;
+                updateConfig.MemorySwap = -1; // Unlimited swap or match memory
+            }
+            
+            if (cpuCores) {
+                updateConfig.NanoCpus = cpuCores * 1000000000;
+            }
+
+            await container.update(updateConfig);
+            logger.success(`Ресурсы контейнера ${vmName} обновлены: RAM=${ramMB}MB, CPU=${cpuCores}`);
+            return true;
+        } catch (e) {
+            logger.error(`Ошибка обновления ресурсов для ${vmName}:`, e.message);
+            throw e;
+        }
+    }
+
+    async createBackup(vmName, backupName) {
+        await this.ensureConnection();
+        try {
+            const container = this.docker.getContainer(vmName);
+            
+            // Commit the container to a new image
+            // pause: true ensures the container is paused during commit for consistency
+            const data = await container.commit({
+                repo: backupName,
+                comment: `Backup of ${vmName} at ${new Date().toISOString()}`,
+                author: 'IaaS Platform',
+                pause: true 
+            });
+            
+            logger.success(`Бекап (образ) создан: ${backupName} (${data.Id})`);
+            return data.Id; // Return the Image ID
+        } catch (e) {
+            logger.error(`Ошибка создания бекапа для ${vmName}:`, e.message);
+            throw e;
+        }
+    }
+
+    async deleteBackup(imageName) {
+        await this.ensureConnection();
+        try {
+            const image = this.docker.getImage(imageName);
+            await image.remove();
+            logger.success(`Бекап (образ) удален: ${imageName}`);
+        } catch (e) {
+            logger.warn(`Ошибка удаления бекапа ${imageName}:`, e.message);
+            // Don't throw if it doesn't exist
+        }
+    }
+
     async getStats(vmName) {
         await this.ensureConnection();
         try {
@@ -250,29 +330,42 @@ class DockerService {
             
             // Calculate CPU usage
             let cpuUsage = 0.0;
-            const cpuDelta = stats.cpu_stats.cpu_usage.total_usage - stats.precpu_stats.cpu_usage.total_usage;
-            const systemCpuDelta = stats.cpu_stats.system_cpu_usage - stats.precpu_stats.system_cpu_usage;
-            const numberCpus = stats.cpu_stats.online_cpus;
+            
+            // Проверяем наличие статистики процессора
+            if (stats.cpu_stats && stats.precpu_stats && stats.cpu_stats.cpu_usage && stats.precpu_stats.cpu_usage) {
+                const cpuDelta = stats.cpu_stats.cpu_usage.total_usage - stats.precpu_stats.cpu_usage.total_usage;
+                const systemCpuDelta = stats.cpu_stats.system_cpu_usage - stats.precpu_stats.system_cpu_usage;
+                
+                // Fallback если online_cpus отсутствует
+                const numberCpus = stats.cpu_stats.online_cpus || 
+                                 (stats.cpu_stats.cpu_usage.percpu_usage ? stats.cpu_stats.cpu_usage.percpu_usage.length : 1);
 
-            if (systemCpuDelta > 0.0 && numberCpus > 0.0) {
-                cpuUsage = (cpuDelta / systemCpuDelta) * numberCpus * 100.0;
+                if (systemCpuDelta > 0.0 && numberCpus > 0.0) {
+                    cpuUsage = (cpuDelta / systemCpuDelta) * numberCpus * 100.0;
+                }
             }
 
             // Calculate Memory usage
             let usedMemory = 0;
             if (stats.memory_stats && stats.memory_stats.usage) {
                 usedMemory = stats.memory_stats.usage;
-                if (stats.memory_stats.stats && stats.memory_stats.stats.cache) {
-                    usedMemory -= stats.memory_stats.stats.cache;
+                // Вычитаем кэш, как это делает docker stats
+                if (stats.memory_stats.stats) {
+                    if (typeof stats.memory_stats.stats.cache !== 'undefined') {
+                        usedMemory -= stats.memory_stats.stats.cache;
+                    } else if (typeof stats.memory_stats.stats.inactive_file !== 'undefined') {
+                        usedMemory -= stats.memory_stats.stats.inactive_file;
+                    }
                 }
             }
             const memoryUsageMB = usedMemory / (1024 * 1024);
 
             return {
-                cpu: isNaN(cpuUsage) ? 0 : cpuUsage,
-                ram: isNaN(memoryUsageMB) ? 0 : memoryUsageMB
+                cpu: isNaN(cpuUsage) ? 0 : parseFloat(cpuUsage.toFixed(2)),
+                ram: isNaN(memoryUsageMB) ? 0 : parseFloat(memoryUsageMB.toFixed(2))
             };
         } catch (e) {
+            // logger.error(`Ошибка получения статистики для ${vmName}:`, e.message);
             return null;
         }
     }
