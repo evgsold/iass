@@ -538,62 +538,90 @@ class VMManager {
         };
     }
 
-    /**
+        /**
      * Создать бекап ВМ
      */
-    async createBackup(vmId, name, projectId = null) {
-        const vm = await this.getVM(vmId, projectId);
-        if (!vm) {
-            throw new Error('ВМ не найдена или доступ запрещен');
-        }
-
-        if (config.MODE !== 'docker') {
-            throw new Error('Бекапы поддерживаются только в режиме Docker');
-        }
-
-        const backupName = `backup-${vm.name}-${Date.now()}`;
-        const backupDir = path.join(config.VM_STORAGE_DIR || '/tmp/vms', '../backups');
-        
-        if (!fs.existsSync(backupDir)) {
-            fs.mkdirSync(backupDir, { recursive: true });
-        }
-
-        const volumeArchiveName = `${backupName}.tar.gz`;
-        const volumePath = path.join(backupDir, volumeArchiveName);
-        const diskPath = path.join(config.VM_STORAGE_DIR || '/tmp/vms', vm.name);
-        
-        const backup = await Backup.create({
-            vmId: vm.id,
-            name: name || `Backup ${new Date().toLocaleString()}`,
-            imageTag: backupName,
-            volumePath: volumePath,
-            status: 'creating'
-        });
-
-        try {
-            // 1. Create Docker Image Backup
-            await hypervisor.createBackup(vm.name, backupName);
-            
-            // 2. Create Volume Backup (tar.gz)
-            if (fs.existsSync(diskPath)) {
-                logger.info(`Creating volume backup for ${vm.name}...`);
-                await new Promise((resolve, reject) => {
-                    exec(`tar -czf "${volumePath}" -C "${diskPath}" .`, (err) => {
-                        if (err) reject(err);
-                        else resolve();
-                    });
-                });
-                logger.success(`Volume backup created: ${volumePath}`);
+        async createBackup(vmId, name, projectId = null) {
+            const vm = await this.getVM(vmId, projectId);
+            if (!vm) {
+                throw new Error('ВМ не найдена или доступ запрещен');
             }
-
-            await backup.update({ status: 'ready' });
-            return backup;
-        } catch (e) {
-            await backup.update({ status: 'error' });
-            logger.error(`Backup failed: ${e.message}`);
-            throw e;
+    
+            if (config.MODE !== 'docker') {
+                throw new Error('Бекапы поддерживаются только в режиме Docker');
+            }
+    
+            const timestamp = Date.now();
+            const backupName = `backup-${vm.name}-${timestamp}`;
+            
+            // ИСПРАВЛЕНО: Явный путь для бекапов. Убедитесь, что эта папка существует и доступна на запись.
+            const backupDir = config.BACKUP_DIR || '/var/backups/iaas';
+            
+            if (!fs.existsSync(backupDir)) {
+                fs.mkdirSync(backupDir, { recursive: true, mode: 0o755 });
+                logger.info(`Директория бекапов создана: ${backupDir}`);
+            }
+    
+            const volumeArchiveName = `${backupName}.tar.gz`;
+            const volumePath = path.join(backupDir, volumeArchiveName);
+            // Путь к данным ВМ на хосте
+            const diskPath = path.join(config.VM_STORAGE_DIR || '/tmp/vms', vm.name);
+            
+            const backup = await Backup.create({
+                vmId: vm.id,
+                name: name || `Backup ${new Date().toLocaleString()}`,
+                imageTag: backupName,
+                volumePath: volumePath, // Сохраняем полный путь в БД
+                status: 'creating'
+            });
+    
+            try {
+                // 1. Create Docker Image Backup
+                logger.info(`Создание образа контейнера ${backupName}...`);
+                await hypervisor.createBackup(vm.name, backupName);
+                
+                // 2. Create Volume Backup (tar.gz)
+                if (fs.existsSync(diskPath)) {
+                    logger.info(`Создание архива тома для ${vm.name}...`);
+                    
+                    await new Promise((resolve, reject) => {
+                        exec(`tar -czf "${volumePath}" -C "${diskPath}" .`, (err) => {
+                            if (err) {
+                                logger.error(`Ошибка tar: ${err.message}`);
+                                reject(err);
+                            } else {
+                                resolve();
+                            }
+                        });
+                    });
+    
+                    // ИСПРАВЛЕНО: Проверка, что файл действительно создан
+                    if (fs.existsSync(volumePath)) {
+                        const stats = fs.statSync(volumePath);
+                        await backup.update({ 
+                            status: 'ready',
+                            size: Math.round(stats.size / (1024 * 1024)) // Размер в МБ
+                        });
+                        logger.success(`Бекап тома создан: ${volumePath} (${Math.round(stats.size / 1024 / 1024)} MB)`);
+                    } else {
+                        throw new Error(`Файл бекапа не создан после выполнения tar: ${volumePath}`);
+                    }
+                } else {
+                    logger.warn(`Директория диска ВМ не найдена: ${diskPath}. Сохранен только образ контейнера.`);
+                    await backup.update({ status: 'ready' });
+                }
+    
+                return backup;
+            } catch (e) {
+                await backup.update({ status: 'error', error: e.message });
+                logger.error(`Backup failed: ${e.message}`);
+                // Удаляем частичные файлы при ошибке
+                if (fs.existsSync(volumePath)) {
+                    fs.unlinkSync(volumePath);
+                }
+                throw e;
+            }
         }
-    }
 
     /**
      * Получить список бекапов
@@ -622,68 +650,97 @@ class VMManager {
 
         if (config.MODE !== 'docker') throw new Error('Только Docker режим');
 
-        logger.info(`Восстановление ВМ ${vm.name} из бекапа ${backup.name}`);
+        // ИСПРАВЛЕНО: Используем 'deploying' вместо 'restoring'
+        await vm.update({ status: 'deploying' });
+        logger.info(`Начало восстановления ВМ ${vm.name} из бекапа ${backup.name}...`);
 
-        // 1. Stop VM
         try {
-            await this.stopVM(vmId, projectId);
-        } catch (e) {
-            // Ignore if already stopped
-        }
-
-        // 2. Delete current container (keep volume logic handled below)
-        try {
-            await hypervisor.ensureConnection();
-            const container = hypervisor.docker.getContainer(vm.name);
-            await container.remove({ force: true });
-        } catch (e) {
-            if (e.statusCode !== 404 && !e.message.includes('No such container')) {
-                logger.warn(`Ошибка при удалении контейнера для восстановления: ${e.message}`);
+            // 1. Остановка ВМ
+            try {
+                await this.stopVM(vmId, projectId);
+            } catch (e) {
+                logger.warn(`ВМ не была остановлена (возможно уже остановлена): ${e.message}`);
             }
-        }
 
-        const diskPath = path.join(config.VM_STORAGE_DIR || '/tmp/vms', vm.name);
+            // 2. Удаление текущего контейнера
+            try {
+                await hypervisor.ensureConnection();
+                const containers = await hypervisor.docker.listContainers({ all: true, filters: { name: [vm.name] } });
+                if (containers.length > 0) {
+                    const container = hypervisor.docker.getContainer(vm.name);
+                    await container.remove({ force: true });
+                    logger.info(`Старый контейнер ${vm.name} удален`);
+                }
+            } catch (e) {
+                logger.warn(`Ошибка при удалении контейнера: ${e.message}`);
+            }
 
-        // 3. Restore Volume Data
-        if (backup.volumePath && fs.existsSync(backup.volumePath)) {
-            logger.info(`Restoring volume data from ${backup.volumePath}...`);
-            
-            // Clean current disk
-            if (fs.existsSync(diskPath)) {
-                fs.rmSync(diskPath, { recursive: true, force: true });
-                fs.mkdirSync(diskPath, { recursive: true });
+            const diskPath = path.join(config.VM_STORAGE_DIR || '/tmp/vms', vm.name);
+
+            // 3. Восстановление данных тома
+            // ИСПРАВЛЕНО: Подробная проверка пути
+            if (backup.volumePath) {
+                logger.info(`Проверка пути к бекапу: ${backup.volumePath}`);
+                
+                if (fs.existsSync(backup.volumePath)) {
+                    logger.info(`Восстановление данных тома из ${backup.volumePath}...`);
+                    
+                    if (fs.existsSync(diskPath)) {
+                        fs.rmSync(diskPath, { recursive: true, force: true });
+                    }
+                    fs.mkdirSync(diskPath, { recursive: true });
+
+                    await new Promise((resolve, reject) => {
+                        exec(`tar -xzf "${backup.volumePath}" -C "${diskPath}"`, (err) => {
+                            if (err) reject(err);
+                            else resolve();
+                        });
+                    });
+                    logger.success(`Данные тома восстановлены в ${diskPath}`);
+                } else {
+                    // Это теперь будет четкая ошибка, а не тихий пропуск
+                    logger.error(`Файл бекапа отсутствует на диске: ${backup.volumePath}`);
+                    throw new Error(`Файл бекапа не найден: ${backup.volumePath}. Проверьте права доступа или наличие файла.`);
+                }
             } else {
-                fs.mkdirSync(diskPath, { recursive: true });
+                logger.warn('Путь к тому не указан в бекапе');
             }
 
-            // Extract archive
-            await new Promise((resolve, reject) => {
-                exec(`tar -xzf "${backup.volumePath}" -C "${diskPath}"`, (err) => {
-                    if (err) reject(err);
-                    else resolve();
-                });
+            // 4. Обновление конфигурации ВМ
+            await vm.update({ dockerImage: backup.imageTag, type: 'docker' });
+
+            // 5. Пересоздание ВМ
+            logger.info(`Создание контейнера из образа ${backup.imageTag}...`);
+            await hypervisor.createVM({
+                name: vm.name,
+                type: 'docker',
+                dockerImage: backup.imageTag,
+                framework: vm.framework,
+                ram: vm.ram,
+                cpu: vm.cpu,
+                diskPath,
+                hostPort: vm.hostPort,
+                network: config.VM_NETWORK || 'default'
             });
-            logger.success(`Volume data restored.`);
+
+            // 6. Ожидание запуска
+            logger.info(`Ожидание запуска ВМ после восстановления...`);
+            try {
+                await this.waitForVM(vm.name, 60000);
+            } catch (waitErr) {
+                logger.error(`ВМ не запустилась после восстановления: ${waitErr.message}`);
+                throw new Error(`Контейнер создан, но не запустился: ${waitErr.message}`);
+            }
+
+            await vm.update({ status: 'running' });
+            logger.success(`ВМ ${vm.name} успешно восстановлена из бекапа`);
+            return true;
+
+        } catch (error) {
+            logger.error(`Ошибка восстановления ВМ ${vm.name}:`, error);
+            await vm.update({ status: 'error', error: error.message });
+            throw error;
         }
-
-        // 4. Update VM config to use backup image
-        await vm.update({ dockerImage: backup.imageTag, type: 'docker' });
-
-        // 5. Recreate VM
-        await hypervisor.createVM({
-            name: vm.name,
-            type: 'docker', // Treat as generic docker container now since we use custom image
-            dockerImage: backup.imageTag,
-            framework: vm.framework,
-            ram: vm.ram,
-            cpu: vm.cpu,
-            diskPath,
-            hostPort: vm.hostPort,
-            network: config.VM_NETWORK || 'default'
-        });
-
-        await vm.update({ status: 'running' });
-        return true;
     }
 
     /**

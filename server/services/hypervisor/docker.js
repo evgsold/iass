@@ -81,11 +81,11 @@ class DockerService {
                 imageName = vmConfig.dockerImage;
             } else {
                 const frameworks = {
-                    'node': 'node:18',
+                    'node': 'node:25',
                     'python': 'python:3.10',
                     'go': 'golang:1.21'
                 };
-                imageName = frameworks[vmConfig.framework] || 'node:18';
+                imageName = frameworks[vmConfig.framework] || 'node:25';
             }
         } else {
             // Docker type
@@ -126,11 +126,12 @@ class DockerService {
         }
 
         const absoluteDiskPath = path.resolve(vmConfig.diskPath);
-        
-        // Проверка пути перед монтированием
+
         if (!fs.existsSync(absoluteDiskPath)) {
             fs.mkdirSync(absoluteDiskPath, { recursive: true, mode: 0o777 });
+            logger.info(`Директория тома ВМ создана: ${absoluteDiskPath}`);
         }
+        
 
         const container = await this.docker.createContainer({
             Image: imageName,

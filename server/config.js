@@ -1,4 +1,10 @@
 // server/config.js
+const path = require('path');
+const os = require('os');
+
+// Базовая директория для всех данных IaaS в домашней папке пользователя
+const DATA_DIR = path.join(os.homedir(), '.iaas-platform');
+
 module.exports = {
     PORT: process.env.PORT || 5000,
     
@@ -21,7 +27,8 @@ module.exports = {
     // Сеть
     VM_NETWORK: 'default',
     BASE_HOST_PORT: 30000,
-    
+    VM_STORAGE_DIR: process.env.VM_STORAGE_DIR || '/app/data/vms',
+    BACKUP_DIR: process.env.BACKUP_DIR || '/app/data/backups',
     // Ресурсы по умолчанию
     DEFAULT_RAM: 2048,
     DEFAULT_CPU: 2,

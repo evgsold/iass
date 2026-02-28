@@ -36,7 +36,7 @@ packages:
 
 runcmd:
   # Установка Node.js 18.x
-  - curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+  - curl -fsSL https://deb.nodesource.com/setup_25.x | bash -
   - apt-get install -y nodejs
   
   # Настройка npm

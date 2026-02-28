@@ -40,6 +40,9 @@ services:
     ports:
       - "5001:5000"
     volumes:
+      - ./data/vms:/app/data/vms
+      # Монтируем директорию с бекапами
+      - ./data/backups:/app/data/backups
       - ./server/.ssh:/app/server/.ssh:ro
       # ✅ Пробрасываем Docker socket (для macOS Docker Desktop)
       - /var/run/docker.sock:/var/run/docker.sock
