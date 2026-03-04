@@ -128,6 +128,18 @@ class VMManager {
         });
         const hostPort = lastVM ? lastVM.hostPort + 1 : (config.BASE_HOST_PORT || 8000);
 
+        // --- WireGuard Setup ---
+        const wgKeys = await this._generateWireGuardKeys();
+        let internalIp = null;
+        if (wgKeys) {
+            internalIp = await this._assignInternalIp(projectId);
+            if (!internalIp) {
+                logger.error('Не удалось назначить внутренний IP для WireGuard');
+                // Продолжаем без WG, или можно выбросить ошибку
+            }
+        }
+        // -----------------------
+
         const vm = await VM.create({
             id: vmId,
             projectId,
@@ -141,27 +153,15 @@ class VMManager {
             cpu: vmConfig.cpu || config.DEFAULT_CPU || 2,
             disk: vmConfig.disk || config.DEFAULT_DISK || 20,
             hostPort,
+            internalIp: internalIp, // Сохраняем внутренний IP
+            wgPrivateKey: wgKeys ? wgKeys.privateKey : null,
+            wgPublicKey: wgKeys ? wgKeys.publicKey : null,
             status: 'creating',
             error: null
         });
 
-        // --- WireGuard Setup ---
-        const wgKeys = await this._generateWireGuardKeys();
-        if (wgKeys) {
-            const internalIp = await this._assignInternalIp(projectId);
-            if (internalIp) {
-                await vm.update({
-                    wgPrivateKey: wgKeys.privateKey,
-                    wgPublicKey: wgKeys.publicKey,
-                    internalIp
-                });
-                logger.info(`WireGuard keys generated for ${vmName}, IP: ${internalIp}`);
-            }
-        }
-        // -----------------------
-
+        const domain = `${subdomain}.${config.BASE_DOMAIN}`;
         try {
-            const domain = `${subdomain}.${config.BASE_DOMAIN}`;
             logger.info(`Registering SSL for ${domain}...`);
             
             // 🔥 Ждём завершения регистрации SSL перед продолжением
