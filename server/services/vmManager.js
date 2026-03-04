@@ -160,7 +160,7 @@ class VMManager {
             error: null
         });
 
-        const domain = `${subdomain}.${config.BASE_DOMAIN}`;
+        const domain = `${subdomain}.iaasapp.pro`;
         try {
             logger.info(`Registering SSL for ${domain}...`);
             
