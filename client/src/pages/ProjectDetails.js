@@ -164,7 +164,6 @@ const ProjectDetails = () => {
               <Users size={18} /> Invite
             </button>
           )}
-          {canCreate && (
             <button
               onClick={() => setShowVMModal(true)}
               className="btn-create"
@@ -172,7 +171,6 @@ const ProjectDetails = () => {
             >
               <Plus size={18} /> Create Resource
             </button>
-          )}
         </div>
       </div>
 
