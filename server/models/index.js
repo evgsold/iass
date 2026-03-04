@@ -5,6 +5,7 @@ const ProjectUser = require('./ProjectUser');
 const VM = require('./VM');
 const ResourceLog = require('./ResourceLog');
 const Backup = require('./Backup');
+const ProjectInvitation = require('./ProjectInvitation');
 
 // Relations
 User.hasMany(Project, { foreignKey: 'ownerId', as: 'ownedProjects' });
@@ -37,5 +38,6 @@ module.exports = {
     ProjectUser,
     VM,
     ResourceLog,
-    Backup
+    Backup,
+    ProjectInvitation
 };

@@ -15,6 +15,7 @@ const Login = () => {
   useEffect(() => {
     const token = searchParams.get('token');
     const error = searchParams.get('error');
+    const message = searchParams.get('message');
 
     if (token) {
         // Manually set token if returned from OAuth redirect
@@ -25,7 +26,10 @@ const Login = () => {
     }
 
     if (error) {
-        toast.error('Authentication failed');
+        toast.error(error);
+    }
+    if (message) {
+        toast.success(message);
     }
   }, [searchParams]);
 

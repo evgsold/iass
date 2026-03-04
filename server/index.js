@@ -11,7 +11,8 @@ const authMiddleware = require('./middleware/auth');
 const libvirt = require('./services/hypervisor/libvirt');
 const ssh = require('./services/ssh');
 const socketService = require('./socket');
-const { ResourceLog } = require('./models');
+const { ResourceLog, User, VM, Project } = require('./models');
+const adminMiddleware = require('./middleware/admin');
 
 const app = express();
 const server = require('http').createServer(app);
@@ -28,7 +29,7 @@ const corsOptions = {
         if (origin.includes('iaasapp.pro') || 
             origin.includes('localhost') || 
             origin.includes('127.0.0.1') || 
-            origin.includes('104.248.205.79')) {
+            origin.includes('188.166.124.218')) {
             callback(null, true);
         } else {
             // Для целей отладки разрешаем все, если не совпало (или закомментируйте для строгости)
@@ -55,12 +56,92 @@ app.use((req, res, next) => {
 // Connect to Database
 connectDB();
 
+// Create Initial Admin
+const createInitialAdmin = async () => {
+    try {
+        const adminEmail = config.ADMIN_EMAIL;
+        const adminPassword = config.ADMIN_PASSWORD;
+        
+        const existingAdmin = await User.findOne({ where: { role: 'admin' } });
+        if (!existingAdmin) {
+            logger.info('Creating initial admin user...');
+            await User.create({
+                email: adminEmail,
+                password: adminPassword,
+                name: 'Administrator',
+                role: 'admin'
+            });
+            logger.success(`Admin user created: ${adminEmail} / ${adminPassword}`);
+        } else {
+            logger.info('Admin user already exists.');
+        }
+    } catch (error) {
+        logger.error('Failed to create initial admin:', error);
+    }
+};
+
+createInitialAdmin();
+
 // Проверка подключения к libvirt при старте
 let libvirtReady = false;
 libvirt.checkConnection().then(ready => {
     libvirtReady = ready;
     if (!ready) {
         logger.warn('Libvirt недоступен. Работа в демо-режиме.');
+    }
+});
+
+// --- Admin Routes ---
+
+const os = require('os');
+
+app.get('/api/admin/resources', authMiddleware, adminMiddleware, async (req, res) => {
+    try {
+        // Get all VMs to calculate total usage
+        const vms = await VM.findAll();
+        
+        // Calculate total allocated resources
+        const allocated = vms.reduce((acc, vm) => {
+            acc.cpu += (vm.cpu || 0);
+            acc.ram += (vm.ram || 0);
+            acc.disk += (vm.disk || 0);
+            return acc;
+        }, { cpu: 0, ram: 0, disk: 0 });
+
+        // Get system total resources
+        const total = {
+            cpu: os.cpus().length,
+            ram: Math.round(os.totalmem() / (1024 * 1024)), // MB
+            disk: 0 // Disk is hard to get without specific commands, leave as 0 or N/A
+        };
+
+        res.json({
+            allocated,
+            total,
+            vmsCount: vms.length
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/admin/vms', authMiddleware, adminMiddleware, async (req, res) => {
+    try {
+        const vms = await VM.findAll({
+            include: [{
+                model: Project,
+                as: 'project',
+                include: [{
+                    model: User,
+                    as: 'owner',
+                    attributes: ['id', 'name', 'email']
+                }]
+            }],
+            order: [['createdAt', 'DESC']]
+        });
+        res.json(vms);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
     }
 });
 
@@ -143,10 +224,55 @@ app.get('/api/projects/:id', async (req, res) => {
     }
 });
 
-app.post('/api/projects/:id/users', async (req, res) => {
+app.post('/api/projects/:id/invite', authMiddleware, async (req, res) => {
     try {
         const { email, role } = req.body;
-        const result = await projectService.addUserToProject(req.params.id, req.user.id, email, role);
+        const result = await projectService.inviteUserToProject(req.params.id, req.user.id, email, role);
+        res.status(200).json(result);
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+});
+
+app.get('/api/projects/invite/confirm/:token', async (req, res) => {
+    try {
+        const { token } = req.params;
+        const result = await projectService.confirmProjectInvitation(token);
+
+        if (result.requiresRegistration) {
+            // Redirect to registration with pre-filled email
+            return res.redirect(`${config.FRONTEND_URL}/register?email=${result.invitation.email}&token=${token}`);
+        } else if (result.project) {
+            // Redirect to project dashboard after successful join
+            return res.redirect(`${config.FRONTEND_URL}/projects/${result.project}`);
+        } else {
+            // Generic success or already a member
+            return res.redirect(`${config.FRONTEND_URL}/login?message=${encodeURIComponent(result.message)}`);
+        }
+    } catch (error) {
+        logger.error('Error confirming invitation:', error);
+        return res.redirect(`${config.FRONTEND_URL}/login?error=${encodeURIComponent(error.message)}`);
+    }
+});
+
+// This route is now deprecated as we use inviteUserToProject
+app.post('/api/projects/:id/users', async (req, res) => {
+    res.status(405).json({ error: 'Please use /api/projects/:id/invite for sending invitations.' });
+});
+
+app.put('/api/projects/:id/users/:userId/permissions', authMiddleware, async (req, res) => {
+    try {
+        const { permissions } = req.body;
+        const result = await projectService.updateUserPermissions(req.params.id, req.user.id, req.params.userId, permissions);
+        res.json(result);
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+});
+
+app.delete('/api/projects/:id/users/:userId', authMiddleware, async (req, res) => {
+    try {
+        const result = await projectService.removeUserFromProject(req.params.id, req.user.id, req.params.userId);
         res.json(result);
     } catch (error) {
         res.status(400).json({ error: error.message });
@@ -158,8 +284,8 @@ app.post('/api/projects/:id/users', async (req, res) => {
 // Create VM in a project
 app.post('/api/projects/:projectId/vms', authMiddleware, async (req, res) => {
     try {
-        // Check if user has access to project
-        await projectService.getProject(req.params.projectId, req.user.id);
+        // Check if user has access to project and permission
+        await projectService.checkAccess(req.params.projectId, req.user.id, 'canCreateVM');
         
         const { githubUrl, name, ram, cpu, disk } = req.body;
         const vm = await vmManager.createVM({ githubUrl, name, ram, cpu, disk }, req.params.projectId);
@@ -192,7 +318,7 @@ app.get('/api/vms/:id', authMiddleware, async (req, res) => {
             const vm = await vmManager.getVM(req.params.id);
             if (!vm) return res.status(404).json({ error: 'ВМ не найдена' });
             
-            await projectService.getProject(vm.projectId, req.user.id);
+            await projectService.checkAccess(vm.projectId, req.user.id, 'canCreateVM');
             
             const backup = await vmManager.createBackup(vm.id, name, vm.projectId);
             res.status(201).json(backup);
@@ -206,7 +332,7 @@ app.get('/api/vms/:id', authMiddleware, async (req, res) => {
             const vm = await vmManager.getVM(req.params.id);
             if (!vm) return res.status(404).json({ error: 'ВМ не найдена' });
             
-            await projectService.getProject(vm.projectId, req.user.id);
+            await projectService.checkAccess(vm.projectId, req.user.id, 'canViewLogs'); // View permission
             
             const backups = await vmManager.getBackups(vm.id, vm.projectId);
             res.json(backups);
@@ -220,7 +346,7 @@ app.get('/api/vms/:id', authMiddleware, async (req, res) => {
             const vm = await vmManager.getVM(req.params.id);
             if (!vm) return res.status(404).json({ error: 'ВМ не найдена' });
             
-            await projectService.getProject(vm.projectId, req.user.id);
+            await projectService.checkAccess(vm.projectId, req.user.id, 'canCreateVM'); // Restore is destructive
             
             await vmManager.restoreBackup(vm.id, req.params.backupId, vm.projectId);
             res.json({ message: 'ВМ восстановлена из бекапа' });
@@ -236,7 +362,7 @@ app.get('/api/vms/:id', authMiddleware, async (req, res) => {
             const vm = await vmManager.getVM(req.params.id);
             if (!vm) return res.status(404).json({ error: 'ВМ не найдена' });
             
-            await projectService.getProject(vm.projectId, req.user.id);
+            await projectService.checkAccess(vm.projectId, req.user.id, 'canCreateVM'); // Resizing changes resources
             
             const updatedVM = await vmManager.resizeVM(vm.id, parseInt(ram), parseInt(cpu), vm.projectId);
             res.json(updatedVM);
@@ -253,7 +379,7 @@ app.post('/api/vms/:id/:action', authMiddleware, async (req, res) => {
         if (!vm) return res.status(404).json({ error: 'ВМ не найдена' });
         
         // Check access
-        await projectService.getProject(vm.projectId, req.user.id);
+        await projectService.checkAccess(vm.projectId, req.user.id, 'canStartStopVM');
 
         if (action === 'start') {
             await vmManager.startVM(vm.id, vm.projectId);
@@ -286,7 +412,7 @@ app.post('/api/vms/:id/:action', authMiddleware, async (req, res) => {
         if (!vm) return res.status(404).json({ error: 'ВМ не найдена' });
         
         // Check access
-        await projectService.getProject(vm.projectId, req.user.id);
+        await projectService.checkAccess(vm.projectId, req.user.id, 'canDeleteVM');
         
         await vmManager.deleteVM(vm.id, vm.projectId);
         res.json({ message: 'ВМ удалена' });
@@ -301,7 +427,7 @@ app.post('/api/vms/:id/:action', authMiddleware, async (req, res) => {
             if (!vm) return res.status(404).json({ error: 'ВМ не найдена' });
             
             // Check access
-            await projectService.getProject(vm.projectId, req.user.id);
+            await projectService.checkAccess(vm.projectId, req.user.id, 'canViewLogs');
 
             const logs = await vmManager.getLogs(req.params.id);
             res.json({ logs });
@@ -316,8 +442,8 @@ app.post('/api/vms/:id/:action', authMiddleware, async (req, res) => {
             const vm = await vmManager.getVM(req.params.id);
             if (!vm) return res.status(404).json({ error: 'ВМ не найдена' });
             
-            // Check access
-            await projectService.getProject(vm.projectId, req.user.id);
+            // Check access (Basic view access)
+            await projectService.checkAccess(vm.projectId, req.user.id);
 
             const status = await vmManager.getVMRealStatus(req.params.id);
             res.json(status);
@@ -333,7 +459,7 @@ app.post('/api/vms/:id/:action', authMiddleware, async (req, res) => {
             if (!vm) return res.status(404).json({ error: 'ВМ не найдена' });
             
             // Check access
-            await projectService.getProject(vm.projectId, req.user.id);
+            await projectService.checkAccess(vm.projectId, req.user.id, 'canViewLogs');
             
             // Если запрошен параметр current=true, возвращаем текущую статистику
             if (req.query.current === 'true') {

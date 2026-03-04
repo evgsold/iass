@@ -10,6 +10,9 @@ import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 import ProjectDetails from './pages/ProjectDetails';
 import VMDetails from './pages/VMDetails';
+import AdminDashboard from './pages/AdminDashboard';
+import ProjectSettings from './pages/ProjectSettings';
+import ConfirmInvitation from './pages/ConfirmInvitation';
 import ProtectedRoute from './components/ProtectedRoute';
 import Layout from './components/Layout';
 
@@ -21,11 +24,20 @@ function App() {
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
+          <Route path="/confirm-invite" element={<ConfirmInvitation />} />
           
           <Route path="/" element={
             <ProtectedRoute>
               <Layout>
                 <Dashboard />
+              </Layout>
+            </ProtectedRoute>
+          } />
+
+          <Route path="/admin" element={
+            <ProtectedRoute>
+              <Layout>
+                <AdminDashboard />
               </Layout>
             </ProtectedRoute>
           } />
@@ -37,6 +49,14 @@ function App() {
               </Layout>
             </ProtectedRoute>
           } />
+          <Route path="/projects/:id/settings" element={
+            <ProtectedRoute>
+              <Layout>
+                <ProjectSettings />
+              </Layout>
+            </ProtectedRoute>
+          } />
+
           <Route path="/projects/:id/:category" element={
             <ProtectedRoute>
               <Layout>

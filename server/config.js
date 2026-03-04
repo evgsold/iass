@@ -62,5 +62,16 @@ module.exports = {
 
     // SSL
     LETSENCRYPT_EMAIL: 'evgsoldatenko@gmail.com', // Change this to real email
-    LETSENCRYPT_AGREE_TOS: true
+    LETSENCRYPT_AGREE_TOS: true,
+
+    // Admin
+    ADMIN_EMAIL: process.env.ADMIN_EMAIL || 'admin@iaas.local',
+    ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || 'admin123',
+
+    // Email Service
+    EMAIL_HOST: process.env.EMAIL_HOST || 'smtp.mailtrap.io',
+    EMAIL_PORT: process.env.EMAIL_PORT || 2525,
+    EMAIL_USER: process.env.EMAIL_USER || 'your_email_user',
+    EMAIL_PASSWORD: process.env.EMAIL_PASSWORD || 'your_email_password',
+    EMAIL_FROM: process.env.EMAIL_FROM || 'no-reply@iaas.pro'
 };

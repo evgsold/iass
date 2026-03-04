@@ -9,6 +9,7 @@ const cloudinit = require('./cloudinit');
 const ssh = require('./ssh');
 const { VM, Project, ResourceLog, Backup } = require('../models');
 const { exec, execSync } = require('child_process');
+const { registerDomainSSL } = require('../utils/ssl-manager');
 
 class VMManager {
     // --- WireGuard Helpers ---
@@ -162,15 +163,16 @@ class VMManager {
         try {
             const domain = `${subdomain}.${config.BASE_DOMAIN}`;
             logger.info(`Registering SSL for ${domain}...`);
-            exec(`npx greenlock add --subject ${domain} --altnames ${domain}`, { cwd: path.join(__dirname, '..') }, (err, stdout, stderr) => {
-                if (err) {
-                    logger.warn(`Failed to register SSL for ${domain}: ${stderr}`);
-                } else {
-                    logger.success(`SSL registered for ${domain}`);
-                }
-            });
-        } catch (e) {
-            logger.error('Error registering SSL:', e);
+            
+            // 🔥 Ждём завершения регистрации SSL перед продолжением
+            await registerDomainSSL(domain);
+            logger.success(`SSL ready for ${domain}`);
+            
+        } catch (sslError) {
+            logger.error(`SSL registration failed for ${domain}:`, sslError);
+            // Опционально: откатить статус VM или пометить как 'ssl_pending'
+            await vm.update({ status: 'error', error: sslError.message });
+            throw new Error(`Не удалось настроить HTTPS: ${sslError.message}`);
         }
 
         this.provisionVM(vm).catch(err => {

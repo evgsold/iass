@@ -21,6 +21,10 @@ const ProjectUser = sequelize.define('ProjectUser', {
     role: {
         type: DataTypes.ENUM('admin', 'editor', 'viewer'),
         defaultValue: 'editor'
+    },
+    permissions: {
+        type: DataTypes.JSON,
+        defaultValue: {} 
     }
 });
 

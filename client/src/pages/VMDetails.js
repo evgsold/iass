@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import api from '../api';
-import Navbar from '../components/Navbar';
-import { Terminal as TerminalIcon, Activity, Monitor, Save, Settings, RefreshCw } from 'lucide-react';
+// Assuming Navbar is used globally or in App.js, removed from local import if not needed here
+// import Navbar from '../components/Navbar'; 
+import { Terminal as TerminalIcon, Activity, Monitor, Save, Settings, RefreshCw, Server, Cpu, MemoryStick, HardDrive, AlertCircle } from 'lucide-react';
 import { toast } from 'react-toastify';
 import TerminalComponent from '../components/Terminal';
 
@@ -133,99 +134,133 @@ const VMDetails = () => {
       }
   };
 
-  if (!vm) return <div>Loading...</div>;
+  if (!vm) return <div className="loading-state">Loading VM details...</div>;
 
   return (
-    <div className="vm-details-page">
-      <div className="container page-content">
-        <div className="vm-details-card">
-          <h1 className="vm-details-title">{vm.name}</h1>
-          <div className="vm-details-meta">
-            <span>Status: <strong>{vm.status}</strong></span>
-            <span>Type: <strong>{vm.type || 'app'}</strong></span>
-            {vm.type === 'app' && <span>Framework: <strong>{vm.framework || 'node'}</strong></span>}
-            {vm.type === 'docker' && <span>Image: <strong>{vm.dockerImage}</strong></span>}
-            <span>IP: {vm.ip || 'N/A'}</span>
-            <span>RAM: {vm.ram}MB</span>
-            <span>CPU: {vm.cpu} Cores</span>
+    <div style={{ background: '#f9fafb', minHeight: '100vh', padding: '2rem' }}>
+      <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
+        
+        {/* --- Header Section --- */}
+        <div style={{ marginBottom: '2rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
+            <div>
+              <h1 style={{ fontSize: '1.8rem', fontWeight: '700', color: '#111827', margin: '0 0 0.5rem 0', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                {vm.name}
+                <span className={`status-badge ${
+                  vm.status === 'running' || vm.status === 'deployed' ? 'status-running' : 
+                  vm.status === 'error' ? 'status-error' : 'status-default'
+                }`} style={{ fontSize: '0.8rem', padding: '4px 10px', borderRadius: '12px', fontWeight: '600', textTransform: 'uppercase' }}>
+                  {vm.status}
+                </span>
+              </h1>
+              <div style={{ display: 'flex', gap: '20px', color: '#6b7280', fontSize: '0.95rem' }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><Server size={16} /> {vm.type === 'app' ? `${vm.framework} App` : (vm.type === 'docker' ? 'Docker Container' : 'Kubernetes')}</span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><Monitor size={16} /> {vm.ip || 'No IP Assigned'}</span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><MemoryStick size={16} /> {vm.ram} MB RAM</span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><Cpu size={16} /> {vm.cpu} vCPU</span>
+              </div>
+            </div>
+            {/* Optional: Add Action Buttons here like Restart/Delete if needed */}
           </div>
+
           {vm.error && (
-            <div className="vm-error-message">
-              Error: {vm.error}
+            <div style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b', padding: '1rem', borderRadius: '6px', display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '1rem' }}>
+              <AlertCircle size={20} />
+              <span>{vm.error}</span>
             </div>
           )}
         </div>
 
-        <div className="vm-tabs-card">
-          <div className="vm-tabs-header">
-            <button
-              className={`vm-tab-button ${activeTab === 'terminal' ? 'active' : ''}`}
-              onClick={() => setActiveTab('terminal')}
-            >
-              <Monitor size={18} /> Terminal
-            </button>
-            <button
-              className={`vm-tab-button ${activeTab === 'logs' ? 'active' : ''}`}
-              onClick={() => setActiveTab('logs')}
-            >
-              <TerminalIcon size={18} /> Logs
-            </button>
-            <button
-              className={`vm-tab-button ${activeTab === 'resources' ? 'active' : ''}`}
-              onClick={() => setActiveTab('resources')}
-            >
-              <Activity size={18} /> Resources
-            </button>
-            <button
-              className={`vm-tab-button ${activeTab === 'backups' ? 'active' : ''}`}
-              onClick={() => setActiveTab('backups')}
-            >
-              <Save size={18} /> Backups
-            </button>
-            <button
-              className={`vm-tab-button ${activeTab === 'settings' ? 'active' : ''}`}
-              onClick={() => setActiveTab('settings')}
-            >
-              <Settings size={18} /> Settings
-            </button>
+        {/* --- Main Content Card --- */}
+        <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', overflow: 'hidden', border: '1px solid #e5e7eb' }}>
+          
+          {/* Tabs Navigation */}
+          <div style={{ display: 'flex', borderBottom: '1px solid #e5e7eb', background: '#f9fafb' }}>
+            {[
+              { id: 'terminal', label: 'Console', icon: <TerminalIcon size={18} /> },
+              { id: 'logs', label: 'Logs', icon: <Activity size={18} /> },
+              { id: 'resources', label: 'Metrics', icon: <Monitor size={18} /> },
+              { id: 'backups', label: 'Backups', icon: <Save size={18} /> },
+              { id: 'settings', label: 'Settings', icon: <Settings size={18} /> },
+            ].map(tab => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                style={{
+                  padding: '1rem 1.5rem',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  fontSize: '0.95rem',
+                  fontWeight: activeTab === tab.id ? '600' : '500',
+                  color: activeTab === tab.id ? '#0069ff' : '#6b7280',
+                  borderBottom: activeTab === tab.id ? '2px solid #0069ff' : '2px solid transparent',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  transition: 'all 0.2s'
+                }}
+              >
+                {tab.icon} {tab.label}
+              </button>
+            ))}
           </div>
 
-          <div className="vm-tab-content">
+          {/* Tab Content Area */}
+          <div style={{ padding: '2rem', minHeight: '400px' }}>
+            
+            {/* TERMINAL TAB */}
             {activeTab === 'terminal' && (
-              <div className="vm-terminal-container">
+              <div style={{ height: '600px', background: '#1e1e1e', borderRadius: '6px', overflow: 'hidden' }}>
                 <TerminalComponent vmId={id} />
               </div>
             )}
 
+            {/* LOGS TAB */}
             {activeTab === 'logs' && (
-              <div className="vm-logs-display">
-                <pre>{logs || 'No logs available yet...'}</pre>
+              <div style={{ background: '#1e1e1e', color: '#d4d4d4', padding: '1.5rem', borderRadius: '6px', height: '600px', overflowY: 'auto', fontFamily: 'monospace', fontSize: '0.9rem' }}>
+                <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{logs || 'Waiting for logs...'}</pre>
               </div>
             )}
 
+            {/* RESOURCES TAB */}
             {activeTab === 'resources' && (
-              <div className="vm-resources-history">
-                <h3 className="section-title">Resource Usage History</h3>
-                <div className="vm-resources-table-container">
-                  <table className="vm-resources-table">
+              <div>
+                <h3 style={{ fontSize: '1.1rem', fontWeight: '600', marginBottom: '1.5rem', color: '#111827' }}>Resource Usage History</h3>
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
                     <thead>
-                      <tr>
-                        <th>Timestamp</th>
-                        <th>CPU Usage (%)</th>
-                        <th>RAM Usage (MB)</th>
+                      <tr style={{ textAlign: 'left', borderBottom: '2px solid #e5e7eb' }}>
+                        <th style={{ padding: '12px', color: '#6b7280', fontWeight: '600' }}>Timestamp</th>
+                        <th style={{ padding: '12px', color: '#6b7280', fontWeight: '600' }}>CPU Usage</th>
+                        <th style={{ padding: '12px', color: '#6b7280', fontWeight: '600' }}>RAM Usage</th>
                       </tr>
                     </thead>
                     <tbody>
                       {resources.map((log, i) => (
-                        <tr key={i}>
-                          <td>{new Date(log.timestamp).toLocaleString()}</td>
-                          <td>{log.cpuUsage?.toFixed(2)}%</td>
-                          <td>{log.ramUsage?.toFixed(2)}</td>
+                        <tr key={i} style={{ borderBottom: '1px solid #f3f4f6' }}>
+                          <td style={{ padding: '12px', color: '#374151' }}>{new Date(log.timestamp).toLocaleString()}</td>
+                          <td style={{ padding: '12px', color: '#374151' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <div style={{ width: '100px', height: '6px', background: '#e5e7eb', borderRadius: '3px', overflow: 'hidden' }}>
+                                <div style={{ width: `${Math.min(log.cpuUsage, 100)}%`, height: '100%', background: '#0069ff' }}></div>
+                              </div>
+                              {log.cpuUsage?.toFixed(1)}%
+                            </div>
+                          </td>
+                          <td style={{ padding: '12px', color: '#374151' }}>
+                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <div style={{ width: '100px', height: '6px', background: '#e5e7eb', borderRadius: '3px', overflow: 'hidden' }}>
+                                <div style={{ width: `${Math.min((log.ramUsage / vm.ram) * 100, 100)}%`, height: '100%', background: '#10b981' }}></div>
+                              </div>
+                              {log.ramUsage?.toFixed(0)} MB
+                            </div>
+                          </td>
                         </tr>
                       ))}
                       {resources.length === 0 && (
                         <tr>
-                          <td colSpan="3" className="no-resource-data">No resource data available</td>
+                          <td colSpan="3" style={{ padding: '2rem', textAlign: 'center', color: '#9ca3af' }}>No resource data available yet</td>
                         </tr>
                       )}
                     </tbody>
@@ -234,83 +269,141 @@ const VMDetails = () => {
               </div>
             )}
 
+            {/* BACKUPS TAB */}
             {activeTab === 'backups' && (
-                <div className="vm-backups-container">
-                    <div className="vm-backups-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-                        <h3>Container Backups</h3>
-                        <button className="btn btn-primary" onClick={handleCreateBackup} disabled={loading}>
-                            {loading ? 'Creating...' : 'Create Backup'}
-                        </button>
-                    </div>
-                    <div className="vm-backups-list">
-                        {backups.length === 0 ? (
-                            <p>No backups found.</p>
-                        ) : (
-                            <table className="vm-resources-table">
-                                <thead>
-                                    <tr>
-                                        <th>Name</th>
-                                        <th>Created At</th>
-                                        <th>Status</th>
-                                        <th>Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {backups.map(backup => (
-                                        <tr key={backup.id}>
-                                            <td>{backup.name}</td>
-                                            <td>{new Date(backup.createdAt).toLocaleString()}</td>
-                                            <td>{backup.status}</td>
-                                            <td>
-                                                <button 
-                                                    className="btn btn-small btn-secondary" 
-                                                    onClick={() => handleRestoreBackup(backup.id)}
-                                                    disabled={loading || backup.status !== 'ready'}
-                                                >
-                                                    <RefreshCw size={14} /> Restore
-                                                </button>
-                                            </td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        )}
-                    </div>
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+                  <h3 style={{ fontSize: '1.1rem', fontWeight: '600', color: '#111827', margin: 0 }}>Container Backups</h3>
+                  <button 
+                    onClick={handleCreateBackup} 
+                    disabled={loading}
+                    style={{ background: '#0069ff', color: 'white', border: 'none', padding: '0.6rem 1.2rem', borderRadius: '6px', fontWeight: '600', cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.7 : 1 }}
+                  >
+                    {loading ? 'Creating...' : 'Create Backup'}
+                  </button>
                 </div>
+                
+                {backups.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '3rem', color: '#9ca3af', background: '#f9fafb', borderRadius: '6px', border: '1px dashed #d1d5db' }}>
+                    <Save size={40} style={{ margin: '0 auto 10px', opacity: 0.5 }} />
+                    <p>No backups found for this resource.</p>
+                  </div>
+                ) : (
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
+                    <thead>
+                      <tr style={{ textAlign: 'left', borderBottom: '2px solid #e5e7eb' }}>
+                        <th style={{ padding: '12px', color: '#6b7280', fontWeight: '600' }}>Name</th>
+                        <th style={{ padding: '12px', color: '#6b7280', fontWeight: '600' }}>Created At</th>
+                        <th style={{ padding: '12px', color: '#6b7280', fontWeight: '600' }}>Status</th>
+                        <th style={{ padding: '12px', color: '#6b7280', fontWeight: '600' }}>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {backups.map(backup => (
+                        <tr key={backup.id} style={{ borderBottom: '1px solid #f3f4f6' }}>
+                          <td style={{ padding: '12px', fontWeight: '500', color: '#111827' }}>{backup.name}</td>
+                          <td style={{ padding: '12px', color: '#6b7280' }}>{new Date(backup.createdAt).toLocaleString()}</td>
+                          <td style={{ padding: '12px' }}>
+                            <span style={{ 
+                              padding: '4px 8px', 
+                              borderRadius: '4px', 
+                              fontSize: '0.8rem', 
+                              fontWeight: '600',
+                              background: backup.status === 'ready' ? '#d1fae5' : '#fee2e2',
+                              color: backup.status === 'ready' ? '#065f46' : '#991b1b'
+                            }}>
+                              {backup.status}
+                            </span>
+                          </td>
+                          <td style={{ padding: '12px' }}>
+                            <button 
+                              onClick={() => handleRestoreBackup(backup.id)}
+                              disabled={loading || backup.status !== 'ready'}
+                              style={{ 
+                                background: 'white', 
+                                border: '1px solid #d1d5db', 
+                                color: '#374151', 
+                                padding: '6px 12px', 
+                                borderRadius: '4px', 
+                                fontSize: '0.85rem', 
+                                cursor: (loading || backup.status !== 'ready') ? 'not-allowed' : 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px'
+                              }}
+                            >
+                              <RefreshCw size={14} /> Restore
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
             )}
 
+            {/* SETTINGS TAB */}
             {activeTab === 'settings' && (
-                <div className="vm-settings-container">
-                    <h3>Resize Resources</h3>
-                    <div className="form-group">
-                        <label>RAM (MB)</label>
-                        <input 
-                            type="number" 
-                            className="form-control"
-                            value={resizeConfig.ram}
-                            onChange={(e) => setResizeConfig({...resizeConfig, ram: parseInt(e.target.value)})}
-                        />
-                    </div>
-                    <div className="form-group">
-                        <label>CPU (Cores)</label>
-                        <input 
-                            type="number" 
-                            className="form-control"
-                            value={resizeConfig.cpu}
-                            onChange={(e) => setResizeConfig({...resizeConfig, cpu: parseInt(e.target.value)})}
-                        />
-                    </div>
-                    <button className="btn btn-primary" onClick={handleResize} disabled={loading}>
-                        {loading ? 'Updating...' : 'Apply & Resize'}
-                    </button>
-                    <p className="text-muted" style={{ marginTop: '10px', fontSize: '0.9em' }}>
-                        Note: Increasing resources is usually applied immediately. Decreasing might require a restart.
-                    </p>
+              <div style={{ maxWidth: '600px' }}>
+                <h3 style={{ fontSize: '1.1rem', fontWeight: '600', color: '#111827', marginBottom: '1.5rem' }}>Resize Resources</h3>
+                
+                <div style={{ background: '#f9fafb', padding: '1.5rem', borderRadius: '6px', border: '1px solid #e5e7eb' }}>
+                  <div style={{ marginBottom: '1.5rem' }}>
+                    <label style={{ display: 'block', fontWeight: '500', marginBottom: '0.5rem', color: '#374151', fontSize: '0.9rem' }}>RAM (MB)</label>
+                    <input 
+                      type="number" 
+                      value={resizeConfig.ram}
+                      onChange={(e) => setResizeConfig({...resizeConfig, ram: parseInt(e.target.value)})}
+                      style={{ width: '100%', padding: '0.75rem', borderRadius: '6px', border: '1px solid #d1d5db', fontSize: '1rem' }}
+                    />
+                  </div>
+                  
+                  <div style={{ marginBottom: '1.5rem' }}>
+                    <label style={{ display: 'block', fontWeight: '500', marginBottom: '0.5rem', color: '#374151', fontSize: '0.9rem' }}>CPU (Cores)</label>
+                    <input 
+                      type="number" 
+                      value={resizeConfig.cpu}
+                      onChange={(e) => setResizeConfig({...resizeConfig, cpu: parseInt(e.target.value)})}
+                      style={{ width: '100%', padding: '0.75rem', borderRadius: '6px', border: '1px solid #d1d5db', fontSize: '1rem' }}
+                    />
+                  </div>
+
+                  <button 
+                    onClick={handleResize} 
+                    disabled={loading}
+                    style={{ 
+                      background: '#0069ff', 
+                      color: 'white', 
+                      border: 'none', 
+                      padding: '0.75rem 1.5rem', 
+                      borderRadius: '6px', 
+                      fontWeight: '600', 
+                      cursor: loading ? 'not-allowed' : 'pointer',
+                      width: '100%'
+                    }}
+                  >
+                    {loading ? 'Updating Resources...' : 'Apply Changes'}
+                  </button>
+                  
+                  <p style={{ marginTop: '1rem', fontSize: '0.85rem', color: '#6b7280', lineHeight: '1.5' }}>
+                    <strong>Note:</strong> Increasing resources is usually applied immediately. Decreasing resources might require a container restart.
+                  </p>
                 </div>
+              </div>
             )}
+
           </div>
         </div>
       </div>
+      
+      {/* Global Styles for Status Badges (Injecting via style tag for simplicity) */}
+      <style>{`
+        .status-running { background-color: #dcfce7; color: #166534; }
+        .status-error { background-color: #fee2e2; color: #991b1b; }
+        .status-default { background-color: #f3f4f6; color: #4b5563; }
+        .loading-state { display: flex; justify-content: center; align-items: center; height: 100vh; color: #6b7280; font-size: 1.2rem; }
+      `}</style>
     </div>
   );
 };

@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useContext } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import api from '../api';
+import { AuthContext } from '../context/AuthContext';
 import { 
   Plus, Server, Users, Trash2, Play, Square, RotateCw, MoreVertical, 
   Box, Globe, Terminal, Github, Container, Layers, Check, Cpu, MemoryStick, HardDrive 
@@ -9,6 +10,7 @@ import { toast } from 'react-toastify';
 
 const ProjectDetails = () => {
   const { id, category } = useParams();
+  const { user: currentUser } = useContext(AuthContext);
   const [project, setProject] = useState(null);
   const [showVMModal, setShowVMModal] = useState(false);
   const [showUserModal, setShowUserModal] = useState(false);
@@ -49,6 +51,16 @@ const ProjectDetails = () => {
 
   const filteredVMs = getFilteredVMs();
   const sectionTitle = !category ? 'Overview' : (category === 'apps' ? 'Apps & Docker' : 'Kubernetes Clusters');
+
+  // Permissions Check
+  const currentProjectUser = project?.users?.find(u => u.id === currentUser?.id);
+  const permissions = currentProjectUser?.ProjectUser?.permissions || {};
+  const isAdmin = currentProjectUser?.ProjectUser?.role === 'admin';
+
+  const canCreate = isAdmin || permissions.canCreateVM;
+  const canDelete = isAdmin || permissions.canDeleteVM;
+  const canStartStop = isAdmin || permissions.canStartStopVM;
+  const canManageAccess = isAdmin || permissions.canManageAccess;
 
   useEffect(() => {
     if (showVMModal) {
@@ -92,13 +104,13 @@ const ProjectDetails = () => {
   const handleAddUser = async (e) => {
     e.preventDefault();
     try {
-      await api.post(`/projects/${id}/users`, newUser);
-      toast.success('User added to project');
+      const response = await api.post(`/projects/${id}/invite`, newUser);
+      toast.success(response.data.message || 'Приглашение отправлено');
       setShowUserModal(false);
       setNewUser({ email: '', role: 'viewer' });
       fetchProject();
     } catch (error) {
-      toast.error(error.response?.data?.error || 'Failed to add user');
+      toast.error(error.response?.data?.error || 'Failed to send invitation');
     }
   };
 
@@ -143,20 +155,24 @@ const ProjectDetails = () => {
           <p style={{ color: '#6b7280', margin: '5px 0 0 0' }}>{project.description}</p>
         </div>
         <div style={{ display: 'flex', gap: '10px' }}>
-          <button
-            onClick={() => setShowUserModal(true)}
-            className="btn-secondary"
-            style={{ background: 'white', border: '1px solid #d1d5db', padding: '0.5rem 1rem', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px' }}
-          >
-            <Users size={18} /> Invite
-          </button>
-          <button
-            onClick={() => setShowVMModal(true)}
-            className="btn-create"
-            style={{ backgroundColor: '#0069ff', color: 'white', border: 'none', padding: '0.5rem 1rem', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px', fontWeight: '600' }}
-          >
-            <Plus size={18} /> Create Resource
-          </button>
+          {canManageAccess && (
+            <button
+              onClick={() => setShowUserModal(true)}
+              className="btn-secondary"
+              style={{ background: 'white', border: '1px solid #d1d5db', padding: '0.5rem 1rem', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px' }}
+            >
+              <Users size={18} /> Invite
+            </button>
+          )}
+          {canCreate && (
+            <button
+              onClick={() => setShowVMModal(true)}
+              className="btn-create"
+              style={{ backgroundColor: '#0069ff', color: 'white', border: 'none', padding: '0.5rem 1rem', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px', fontWeight: '600' }}
+            >
+              <Plus size={18} /> Create Resource
+            </button>
+          )}
         </div>
       </div>
 
@@ -201,9 +217,15 @@ const ProjectDetails = () => {
                   <Link to={`/vms/${vm.id}`} className="icon-btn" title="Console">
                     <Terminal size={18} />
                   </Link>
-                  <button onClick={() => handleVMAction(vm.id, 'start')} className="icon-btn" title="Start"><Play size={18} /></button>
-                  <button onClick={() => handleVMAction(vm.id, 'stop')} className="icon-btn" title="Stop"><Square size={18} /></button>
-                  <button onClick={() => handleDeleteVM(vm.id)} className="icon-btn" title="Delete" style={{ color: '#ef4444' }}><Trash2 size={18} /></button>
+                  {canStartStop && (
+                    <>
+                      <button onClick={() => handleVMAction(vm.id, 'start')} className="icon-btn" title="Start"><Play size={18} /></button>
+                      <button onClick={() => handleVMAction(vm.id, 'stop')} className="icon-btn" title="Stop"><Square size={18} /></button>
+                    </>
+                  )}
+                  {canDelete && (
+                    <button onClick={() => handleDeleteVM(vm.id)} className="icon-btn" title="Delete" style={{ color: '#ef4444' }}><Trash2 size={18} /></button>
+                  )}
                 </div>
               </div>
             </div>
@@ -211,9 +233,11 @@ const ProjectDetails = () => {
           {filteredVMs.length === 0 && (
             <div style={{ padding: '3rem', textAlign: 'center', color: '#6b7280' }}>
               <p>No resources found in this category.</p>
-              <button onClick={() => setShowVMModal(true)} style={{ color: '#0069ff', background: 'none', border: 'none', cursor: 'pointer', fontWeight: '600', marginTop: '10px' }}>
-                Create a resource
-              </button>
+              {canCreate && (
+                <button onClick={() => setShowVMModal(true)} style={{ color: '#0069ff', background: 'none', border: 'none', cursor: 'pointer', fontWeight: '600', marginTop: '10px' }}>
+                  Create a resource
+                </button>
+              )}
             </div>
           )}
         </div>

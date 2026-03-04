@@ -1,10 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useContext } from 'react';
 import { Link, useLocation, useParams } from 'react-router-dom';
-import { Folder, Server, Settings, LogOut, Box, Grid, Database, Layout } from 'lucide-react';
+import { Folder, Server, Settings, LogOut, Box, Grid, Database, Layout, Shield } from 'lucide-react';
+import { AuthContext } from '../context/AuthContext';
 
 const Sidebar = ({ projects }) => {
   const location = useLocation();
   const { id: projectId } = useParams(); // Get projectId from URL if present
+  const { user } = useContext(AuthContext);
 
   // Find current project if in project context
   const currentProject = projectId ? projects.find(p => p.id === projectId) : null;
@@ -63,6 +65,12 @@ const Sidebar = ({ projects }) => {
                     <Folder size={18} />
                     <span>Projects</span>
                 </Link>
+                {user && user.role === 'admin' && (
+                    <Link to="/admin" className={`nav-item ${location.pathname === '/admin' ? 'active' : ''}`}>
+                        <Shield size={18} />
+                        <span>Admin Panel</span>
+                    </Link>
+                )}
             </div>
         )}
 
