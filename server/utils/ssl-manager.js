@@ -3,7 +3,7 @@ const greenlock = require('greenlock-express');
 const glx = greenlock.init({
     packageRoot: __dirname,
     configDir: './greenlock.d',
-    maintainerEmail: process.env.LETSENCRYPT_EMAIL,
+    maintainerEmail: "evgsoldatenko@gmail.com",
     cluster: false,
     staging: process.env.NODE_ENV !== 'production'
 });
@@ -13,7 +13,7 @@ const registerDomainSSL = async (domain) => {
         glx.manager.add({
             subject: domain,
             altnames: [domain],
-            email: process.env.LETSENCRYPT_EMAIL,
+            email: "evgsoldatenko@gmail.com",
             agreeTos: true
         }).then(() => {
             // Ждём немного, пока Greenlock выполнит ACME challenge
