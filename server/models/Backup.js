@@ -25,16 +25,27 @@ const Backup = sequelize.define('Backup', {
     },
     volumePath: {
         type: DataTypes.STRING,
-        allowNull: true // Path to the tar.gz archive of the volume
+        allowNull: true
+    },
+    volumeName: {
+        type: DataTypes.STRING,
+        allowNull: true
     },
     size: {
-        type: DataTypes.INTEGER, // In MB
+        type: DataTypes.INTEGER,
         defaultValue: 0
     },
     status: {
         type: DataTypes.ENUM('creating', 'ready', 'error'),
         defaultValue: 'creating'
+    },
+    error: {
+        type: DataTypes.TEXT,
+        allowNull: true
     }
+}, {
+    tableName: 'Backups',
+    timestamps: true
 });
 
 module.exports = Backup;

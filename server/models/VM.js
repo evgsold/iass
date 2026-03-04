@@ -67,6 +67,18 @@ const VM = sequelize.define('VM', {
             model: 'Projects',
             key: 'id'
         }
+    },
+    internalIp: {
+        type: DataTypes.STRING,
+        allowNull: true
+    },
+    wgPublicKey: {
+        type: DataTypes.STRING,
+        allowNull: true
+    },
+    wgPrivateKey: {
+        type: DataTypes.STRING,
+        allowNull: true
     }
 });
 

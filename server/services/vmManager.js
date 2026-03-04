@@ -1,4 +1,3 @@
-// server/services/vmManager.js
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 const path = require('path');
@@ -9,20 +8,100 @@ const hypervisor = require('./hypervisor');
 const cloudinit = require('./cloudinit');
 const ssh = require('./ssh');
 const { VM, Project, ResourceLog, Backup } = require('../models');
-
-const { exec } = require('child_process');
+const { exec, execSync } = require('child_process');
 
 class VMManager {
-    /**
-     * Создает новую виртуальную машину
-     */
+    // --- WireGuard Helpers ---
+    async _generateWireGuardKeys() {
+        try {
+            const privateKey = execSync('wg genkey').toString().trim();
+            const publicKey = execSync(`echo "${privateKey}" | wg pubkey`).toString().trim();
+            return { privateKey, publicKey };
+        } catch (e) {
+            logger.warn('WireGuard tools not found, skipping WG setup:', e.message);
+            return null;
+        }
+    }
+
+    async _assignInternalIp(projectId) {
+        // Simple strategy: 10.10.{project_hash}.{vm_count + 2}
+        // project_hash = last byte of UUID or similar
+        const project = await Project.findByPk(projectId);
+        if (!project) return null;
+
+        // Generate a deterministic subnet octet from project ID
+        const octet = parseInt(projectId.split('-').pop(), 16) % 254 + 1; 
+        
+        // Find existing IPs in this subnet
+        const vms = await VM.findAll({ where: { projectId } });
+        const usedIps = vms.map(v => v.internalIp).filter(Boolean);
+        
+        // Find first free IP starting from .2
+        for (let i = 2; i < 255; i++) {
+            const ip = `10.10.${octet}.${i}`;
+            if (!usedIps.includes(ip)) {
+                return ip;
+            }
+        }
+        return null; // Subnet full
+    }
+
+    async _getWireGuardPeers(projectId, currentVmId) {
+        const peers = await VM.findAll({
+            where: {
+                projectId,
+                id: { [Op.ne]: currentVmId },
+                wgPublicKey: { [Op.not]: null },
+                internalIp: { [Op.not]: null },
+                ip: { [Op.not]: null } // Must have external IP for endpoint
+            }
+        });
+
+        return peers.map(p => ({
+            publicKey: p.wgPublicKey,
+            allowedIps: `${p.internalIp}/32`,
+            endpoint: `${p.ip}:51820` // Standard WG port
+        }));
+    }
+
+    async _updateExistingPeers(newVm) {
+        if (!newVm.wgPublicKey || !newVm.internalIp || !newVm.ip) return;
+
+        const peers = await VM.findAll({
+            where: {
+                projectId: newVm.projectId,
+                id: { [Op.ne]: newVm.id },
+                wgPublicKey: { [Op.not]: null },
+                status: { [Op.or]: ['running', 'deployed'] }
+            }
+        });
+
+        for (const peer of peers) {
+            try {
+                logger.info(`Updating WireGuard peer on ${peer.name}...`);
+                // Command to add peer
+                const cmd = `wg set wg0 peer ${newVm.wgPublicKey} allowed-ips ${newVm.internalIp}/32 endpoint ${newVm.ip}:51820 persistent-keepalive 25`;
+                
+                // Execute on peer VM
+                await hypervisor.execCommand(peer.name, cmd);
+                
+                // Save config if possible to persist across reboots
+                // If SaveConfig=true is set, it might save on shutdown, but explicit save is safer if supported
+                await hypervisor.execCommand(peer.name, 'wg-quick save wg0 || true');
+                
+            } catch (e) {
+                logger.warn(`Failed to update WireGuard peer on ${peer.name}: ${e.message}`);
+            }
+        }
+    }
+    // -------------------------
+
     async createVM(vmConfig, projectId) {
         const project = await Project.findByPk(projectId);
         if (!project) {
             throw new Error('Проект не найден');
         }
 
-        // Проверка квот (без фильтрации по статусу deleted)
         const projectVMsCount = await VM.count({ where: { projectId } });
         
         const maxVMs = config.MAX_VMS_PER_PROJECT || 5;
@@ -33,7 +112,6 @@ class VMManager {
         const vmId = uuidv4();
         const sanitizedName = (vmConfig.name || '').replace(/[^a-zA-Z0-9-]/g, '-').toLowerCase();
         
-        // Generate subdomain
         let subdomain = sanitizedName;
         let counter = 1;
         while (await VM.findOne({ where: { subdomain } })) {
@@ -41,9 +119,8 @@ class VMManager {
             counter++;
         }
 
-        const vmName = `nextjs-${sanitizedName ? sanitizedName + '-' : ''}${vmId.substring(0, 8)}`;
+        const vmName = `app-${sanitizedName ? sanitizedName + '-' : ''}${vmId.substring(0, 8)}`;
         
-        // Поиск следующего доступного порта
         const lastVM = await VM.findOne({ 
             order: [['hostPort', 'DESC']],
             where: { projectId }
@@ -67,7 +144,21 @@ class VMManager {
             error: null
         });
 
-        // Register domain with Greenlock
+        // --- WireGuard Setup ---
+        const wgKeys = await this._generateWireGuardKeys();
+        if (wgKeys) {
+            const internalIp = await this._assignInternalIp(projectId);
+            if (internalIp) {
+                await vm.update({
+                    wgPrivateKey: wgKeys.privateKey,
+                    wgPublicKey: wgKeys.publicKey,
+                    internalIp
+                });
+                logger.info(`WireGuard keys generated for ${vmName}, IP: ${internalIp}`);
+            }
+        }
+        // -----------------------
+
         try {
             const domain = `${subdomain}.${config.BASE_DOMAIN}`;
             logger.info(`Registering SSL for ${domain}...`);
@@ -82,7 +173,6 @@ class VMManager {
             logger.error('Error registering SSL:', e);
         }
 
-        // Асинхронная подготовка ВМ
         this.provisionVM(vm).catch(err => {
             vm.update({ 
                 status: 'error', 
@@ -96,14 +186,10 @@ class VMManager {
         return vm;
     }
 
-    /**
-     * Подготовка и настройка ВМ
-     */
     async provisionVM(vm) {
         try {
             logger.info(`Начало подготовки ВМ: ${vm.name}`);
 
-            // CloudInit нужен только для Libvirt
             let cloudInitIso = null;
             if (config.MODE !== 'docker') {
                 await cloudinit.downloadCloudImage();
@@ -111,17 +197,35 @@ class VMManager {
                 const sshKeyPath = config.SSH_KEY_PATH || '/root/.ssh/id_rsa';
                 
                 if (!fs.existsSync(sshKeyPath + '.pub')) {
-                    throw new Error(`SSH ключ не найден: ${sshKeyPath}.pub. Запустите: ssh-keygen -t rsa`);
+                    throw new Error(`SSH ключ не найден: ${sshKeyPath}.pub`);
                 }
                 
                 const sshPublicKey = fs.readFileSync(sshKeyPath + '.pub', 'utf8').trim();
-                cloudInitIso = await cloudinit.createISO(vm.name, vm.id, sshPublicKey);
+                
+                // Get peers for WireGuard
+                const wgPeers = vm.wgPublicKey ? await this._getWireGuardPeers(vm.projectId, vm.id) : [];
+                
+                cloudInitIso = await cloudinit.createISO({
+                    name: vm.name,
+                    id: vm.id,
+                    sshPublicKey,
+                    type: vm.type,
+                    framework: vm.framework,
+                    dockerImage: vm.dockerImage,
+                    hostPort: vm.hostPort,
+                    cmd: initialCmd,
+                    // Pass WG config
+                    wgPrivateKey: vm.wgPrivateKey,
+                    wgInternalIp: vm.internalIp,
+                    wgPeers
+                });
             }
 
-            // Создание диска
             const diskPath = await hypervisor.createDisk(vm.name, vm.disk);
+            logger.info(`Том ВМ создан: ${diskPath}`);
 
-            // Создание и запуск ВМ
+            const initialCmd = config.MODE === 'docker' ? ['sh', '-c', 'while :; do sleep 1; done'] : undefined;
+
             await hypervisor.createVM({
                 name: vm.name,
                 type: vm.type,
@@ -131,36 +235,35 @@ class VMManager {
                 cpu: vm.cpu,
                 diskPath,
                 cloudInitIso,
-                network: config.VM_NETWORK || 'default',
+                network: config.VM_NETWORK || 'app-network',
                 hostPort: vm.hostPort,
+                cmd: initialCmd
             });
 
             await vm.update({ status: 'running' });
             logger.info(`ВМ ${vm.name} запущена, ожидание готовности...`);
 
-            // Ожидание запуска ВМ
             await this.waitForVM(vm.name);
             
-            // Получение IP адреса
             const ip = await hypervisor.getVMIP(vm.name);
             await vm.update({ 
                 ip, 
                 status: 'deploying'
             });
 
-            // Деплой приложения
+            // Update existing peers with new VM info
+            if (vm.wgPublicKey && vm.internalIp) {
+                await this._updateExistingPeers(vm);
+            }
+
             let deployResult = { success: true };
             
             if (config.MODE === 'docker') {
-                // В тестовом режиме эмулируем деплой
                 if (vm.type === 'app') {
-                    logger.info(`Test mode: эмуляция деплоя для ${vm.name}`);
-                    await this.deployViaDocker(vm);
-                } else {
-                    logger.info(`Container/K8s mode: пропуск деплоя приложения для ${vm.name}`);
+                    logger.info(`Docker mode: деплой для ${vm.name}`);
+                    deployResult = await this.deployViaDocker(vm);
                 }
             } else {
-                // Продакшен деплой через SSH
                 if (ip) {
                     if (vm.githubUrl) {
                         deployResult = await ssh.deployApp(ip, vm.githubUrl, vm.name);
@@ -194,109 +297,437 @@ class VMManager {
     }
 
     /**
-     * Запуск приложения внутри контейнера
+     * 🔍 ПРЯМАЯ ПРОВЕРКА ЧЕРЕЗ NODE.JS / DOCKER API
      */
-    async startAppInDocker(vm) {
-        const vmName = vm.name;
-        logger.info(`Запуск приложения (${vm.framework}) в контейнере ${vmName}...`);
-        
+    async detectFramework(vmName) {
         try {
-            let startCmd = '';
+            logger.info(`🔍 Начало анализа проекта в ${vmName}...`);
             
-            if (vm.framework === 'node') {
-                const check = await hypervisor.execCommand(vmName, '[ -f package.json ] && echo "yes" || echo "no"');
-                if (check.trim() === 'yes') {
-                    startCmd = 'nohup env PORT=3000 HOST=0.0.0.0 npm start > /app/app.log 2>&1 &';
-                }
-            } else if (vm.framework === 'python') {
-                const check = await hypervisor.execCommand(vmName, '[ -f app.py ] && echo "yes" || echo "no"');
-                if (check.trim() === 'yes') {
-                    startCmd = 'nohup env PORT=3000 HOST=0.0.0.0 python app.py > /app/app.log 2>&1 &';
-                } else {
-                    // Try flask
-                    const checkFlask = await hypervisor.execCommand(vmName, '[ -f wsgi.py ] || [ -f main.py ] && echo "yes" || echo "no"');
-                    if (checkFlask.trim() === 'yes') {
-                         startCmd = 'nohup env PORT=3000 HOST=0.0.0.0 python main.py > /app/app.log 2>&1 &';
-                    }
-                }
-            } else if (vm.framework === 'go') {
-                const check = await hypervisor.execCommand(vmName, '[ -f main.go ] && echo "yes" || echo "no"');
-                if (check.trim() === 'yes') {
-                    startCmd = 'nohup env PORT=3000 HOST=0.0.0.0 go run main.go > /app/app.log 2>&1 &';
-                }
+            // 1. Проверяем наличие package.json через Docker API
+            logger.info('⏳ Проверка наличия package.json через Docker API...');
+            const packageExists = await hypervisor.fileExists(vmName, '/app/package.json');
+            
+            logger.info(`📋 Результат проверки: ${packageExists ? 'FOUND' : 'NOT_FOUND'}`);
+            
+            if (!packageExists) {
+                logger.error('❌ package.json не найден!');
+                const dirList = await hypervisor.listDirectory(vmName, '/app/');
+                logger.error('📂 Содержимое /app/:', dirList);
+                throw new Error('package.json не найден в репозитории');
+            }
+            
+            logger.success('✅ package.json найден');
+
+            // 2. Читаем файл через Docker API
+            logger.info('📖 Чтение package.json...');
+            let packageContent = await hypervisor.readFile(vmName, '/app/package.json');
+            
+            // Очищаем от возможных служебных символов
+            packageContent = packageContent.trim();
+            const jsonMatch = packageContent.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                packageContent = jsonMatch[0];
             }
 
-            if (startCmd) {
-                await hypervisor.execCommand(vmName, startCmd);
-                logger.success(`Приложение в ${vmName} запущено`);
-            } else {
-                logger.warn(`Не найден файл запуска для ${vm.framework} в ${vmName}`);
+            logger.info('📄 package.json успешно прочитан');
+            logger.debug('📦 Содержимое:', packageContent.substring(0, 300));
+
+            // 3. Парсим JSON
+            const pkg = JSON.parse(packageContent);
+            const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+            const scripts = pkg.scripts || {};
+
+            logger.info(`📦 Найденные зависимости: ${Object.keys(deps).length} пакетов`);
+            logger.info(`📦 Ключевые зависимости: ${Object.keys(deps).filter(d => 
+                ['next', 'react', 'vue', 'angular', 'nuxt', 'svelte', 'express', 'fastify', 'nest'].includes(d)
+            ).join(', ')}`);
+
+            // 4. Определение фреймворка
+            if (deps['next'] || deps['nextjs']) {
+                logger.success('✅ Определен фреймворк: Next.js');
+                return 'nextjs';
             }
+            if (deps['nuxt'] || deps['@nuxt/kit'] || deps['@nuxt/vue-app']) {
+                logger.success('✅ Определен фреймворк: Nuxt.js');
+                return 'nuxt';
+            }
+            if (deps['@angular/core'] || deps['@angular/cli']) {
+                logger.success('✅ Определен фреймворк: Angular');
+                return 'angular';
+            }
+            if (deps['@sveltejs/kit']) {
+                logger.success('✅ Определен фреймворк: SvelteKit');
+                return 'sveltekit';
+            }
+            if (deps['vite'] && deps['vue']) {
+                logger.success('✅ Определен фреймворк: Vue + Vite');
+                return 'vue';
+            }
+            if (deps['@vue/cli-service']) {
+                logger.success('✅ Определен фреймворк: Vue CLI');
+                return 'vue';
+            }
+            if (deps['vite'] && deps['react']) {
+                logger.success('✅ Определен фреймворк: React + Vite');
+                return 'react-vite';
+            }
+            if (deps['react-scripts']) {
+                logger.success('✅ Определен фреймворк: React (CRA)');
+                return 'react-cra';
+            }
+            if (deps['svelte']) {
+                logger.success('✅ Определен фреймворк: Svelte');
+                return 'svelte';
+            }
+            if (deps['@nestjs/core']) {
+                logger.success('✅ Определен фреймворк: NestJS');
+                return 'nest';
+            }
+            if (deps['express']) {
+                logger.success('✅ Определен фреймворк: Express');
+                return 'express';
+            }
+            if (deps['fastify']) {
+                logger.success('✅ Определен фреймворк: Fastify');
+                return 'fastify';
+            }
+            if (deps['koa']) {
+                logger.success('✅ Определен фреймворк: Koa');
+                return 'koa';
+            }
+            if (deps['hono']) {
+                logger.success('✅ Определен фреймворк: Hono');
+                return 'hono';
+            }
+            
+            if (scripts.build && (scripts.build.includes('vite') || scripts.build.includes('webpack'))) {
+                logger.success('✅ Определен фреймворк: SPA (Vite/Webpack)');
+                return 'spa';
+            }
+
+            logger.info('ℹ️ Специфичные фреймворки не найдены, используем Node.js');
+            return 'node';
         } catch (e) {
-            logger.error(`Ошибка запуска приложения в ${vmName}:`, e);
+            logger.error('❌ Критическая ошибка определения фреймворка:', e.message);
+            logger.error('📋 Stack:', e.stack);
+            
+            try {
+                const dirList = await hypervisor.listDirectory(vmName, '/app/');
+                logger.error('📂 Итоговое содержимое /app/:', dirList);
+            } catch (listErr) {
+                logger.error('Не удалось получить список файлов:', listErr.message);
+            }
+            
+            return 'node';
         }
     }
 
-    /**
-     * Деплой через Docker (тестовый режим)
-     */
+    getInstallCommands(framework) {
+        switch (framework) {
+            case 'nextjs':
+            case 'react-cra':
+            case 'react-vite':
+            case 'vue':
+            case 'angular':
+            case 'nuxt':
+            case 'svelte':
+            case 'sveltekit':
+            case 'nest':
+            case 'express':
+            case 'fastify':
+            case 'koa':
+            case 'hono':
+            case 'node':
+            case 'spa':
+                return [
+                    'npm install --legacy-peer-deps || npm install',
+                    'npm ci --legacy-peer-deps || npm ci || true'
+                ];
+            case 'django':
+            case 'flask':
+            case 'python':
+                return [
+                    'pip install --upgrade pip',
+                    'pip install -r requirements.txt',
+                    'pip install gunicorn'
+                ];
+            case 'go':
+                return [
+                    'go mod download',
+                    'go mod tidy'
+                ];
+            case 'rust':
+                return [
+                    'cargo fetch',
+                    'cargo build --release'
+                ];
+            case 'php':
+                return [
+                    'composer install --no-dev --optimize-autoloader'
+                ];
+            default:
+                return ['npm install'];
+        }
+    }
+
+    getBuildCommands(framework) {
+        switch (framework) {
+            case 'nextjs':
+                // Next.js требует особые переменные окружения для сборки
+                return [
+                    'export NODE_ENV=production',
+                    'export NEXT_TELEMETRY_DISABLED=1',
+                    'npm run build'
+                ];
+            case 'nuxt':
+                return [
+                    'export NODE_ENV=production',
+                    'npm run build'
+                ];
+            case 'react-cra':
+            case 'react-vite':
+            case 'vue':
+            case 'angular':
+            case 'svelte':
+            case 'sveltekit':
+            case 'nest':
+            case 'spa':
+                return ['npm run build'];
+            case 'go':
+                return ['go build -o app'];
+            case 'rust':
+                return ['cargo build --release'];
+            case 'django':
+            case 'flask':
+            case 'python':
+            case 'node':
+            case 'express':
+            case 'fastify':
+            case 'koa':
+            case 'hono':
+            case 'php':
+            case 'static':
+                return [];
+            default:
+                return ['npm run build || true'];
+        }
+    }
+
+    getStartCommand(framework) {
+        const envSetup = 'export PORT=3000\nexport HOST=0.0.0.0\nexport NODE_ENV=production';
+        
+        switch (framework) {
+            case 'nextjs':
+                return `${envSetup}\nnpm run start -- -p 3000 -H 0.0.0.0`;
+            case 'nuxt':
+                return `${envSetup}\nnpm run start -- -p 3000 -H 0.0.0.0`;
+            case 'react-cra':
+            case 'react-vite':
+            case 'vue':
+            case 'angular':
+            case 'svelte':
+            case 'sveltekit':
+            case 'spa':
+                return `${envSetup}\nnpx serve -s build -l 3000 || npx serve -s dist -l 3000 || npx http-server build -p 3000`;
+            case 'nest':
+                return `${envSetup}\nnpm run start:prod`;
+            case 'node':
+            case 'express':
+            case 'fastify':
+            case 'koa':
+            case 'hono':
+                return `${envSetup}\nif grep -q '"start"' package.json; then npm start; elif [ -f server.js ]; then node server.js; elif [ -f index.js ]; then node index.js; elif [ -f app.js ]; then node app.js; else npm start; fi`;
+            case 'django':
+                return `${envSetup}\ngunicorn --bind 0.0.0.0:3000 --workers 3 --timeout 120 wsgi:application || python manage.py runserver 0.0.0.0:3000`;
+            case 'flask':
+                return `${envSetup}\ngunicorn --bind 0.0.0.0:3000 --workers 3 app:app || python app.py`;
+            case 'python':
+                return `${envSetup}\npython main.py || python app.py || python index.py`;
+            case 'go':
+                return `${envSetup}\n./app || go run main.go`;
+            case 'rust':
+                return `${envSetup}\n./target/release/app || cargo run --release`;
+            case 'php':
+                return `${envSetup}\nphp -S 0.0.0.0:3000 -t public || php -S 0.0.0.0:3000`;
+            case 'static':
+                return `${envSetup}\nnpx serve -s . -l 3000 || npx http-server -p 3000`;
+            default:
+                return `${envSetup}\nnpm start`;
+        }
+    }
+
     async deployViaDocker(vm) {
+        const logStep = async (step, total, message, emoji = '🔧') => {
+            const msg = `${emoji} [${step}/${total}] ${message}`;
+            logger.info(msg);
+        };
+
         try {
-            logger.info(`Начало деплоя в Docker контейнере ${vm.name}`);
+            logger.info(`🚀 Начало полного деплоя приложения ${vm.name}`);
+            logger.info(`📦 GitHub URL: ${vm.githubUrl || 'N/A'}`);
+            logger.info(`🏗 Фреймворк: ${vm.framework || 'Auto-detect'}`);
             
             // 1. Подготовка окружения
-            logger.info('Подготовка окружения...');
-            // Установка git если его нет (для node:18-slim может потребоваться)
+            await logStep(1, 6, 'Подготовка окружения и установка инструментов', '🛠');
             try {
-                await hypervisor.execCommand(vm.name, 'which git || (apt-get update && apt-get install -y git)');
+                await hypervisor.execCommand(vm.name, 'apt-get update -qq');
+                await hypervisor.execCommand(vm.name, 'which git || apt-get install -y -qq git');
+                await hypervisor.execCommand(vm.name, 'which curl || apt-get install -y -qq curl');
+                await hypervisor.execCommand(vm.name, 'which build-essential || apt-get install -y -qq build-essential');
+                await hypervisor.execCommand(vm.name, 'which python3 || apt-get install -y -qq python3 python3-pip');
+                logger.success('✅ Окружение подготовлено');
             } catch (e) {
-                logger.warn('Ошибка установки git (возможно уже установлен или нет прав):', e.message);
+                logger.warn('⚠️ Некоторые инструменты уже установлены:', e.message);
             }
 
-            // 2. Клонирование репозитория
+            // 2. Клонирование кода
             if (vm.githubUrl) {
-                logger.info('Клонирование репозитория...');
-                // Очистка директории перед клонированием (на всякий случай)
+                await logStep(2, 6, `Клонирование репозитория ${vm.githubUrl}`, '📥');
                 await hypervisor.execCommand(vm.name, 'rm -rf /app/* /app/.* 2>/dev/null || true');
                 await hypervisor.execCommand(vm.name, `git clone ${vm.githubUrl} .`);
                 
-            // 2. Установка зависимостей и сборка
-            logger.info('Установка зависимостей и сборка...');
-            
-            if (vm.framework === 'node') {
-                await hypervisor.execCommand(vm.name, 'npm install');
-                try {
-                    await hypervisor.execCommand(vm.name, 'npm run build');
-                } catch (e) {
-                    logger.warn('Сборка не удалась или отсутствует скрипт build (это нормально)');
+                logger.info('⏳ Ожидание записи файлов на диск...');
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                
+                const dirList = await hypervisor.listDirectory(vm.name, '/app/');
+                logger.info('📂 Содержимое директории после клонирования:', dirList);
+                
+                logger.success('✅ Код склонирован');
+                
+                // 3. Определение фреймворка
+                await logStep(3, 6, 'Анализ проекта и определение фреймворка', '🔍');
+                let framework = vm.framework;
+                if (!framework || framework === 'unknown') {
+                    framework = await this.detectFramework(vm.name);
+                    await vm.update({ framework });
+                    logger.success(`✅ Фреймворк определен: ${framework.toUpperCase()}`);
+                } else {
+                    logger.success(`✅ Используем указанный фреймворк: ${framework.toUpperCase()}`);
                 }
-            } else if (vm.framework === 'python') {
-                await hypervisor.execCommand(vm.name, 'pip install -r requirements.txt || true');
-            } else if (vm.framework === 'go') {
-                await hypervisor.execCommand(vm.name, 'go mod download || true');
-                await hypervisor.execCommand(vm.name, 'go build -o app || true');
-            }
-            
-            // 4. Запуск приложения
-            await this.startAppInDocker(vm);
+
+                // 4. Установка зависимостей
+                await logStep(4, 6, `Установка зависимостей для ${framework}`, '📦');
+                const installCommands = this.getInstallCommands(framework);
+                for (const cmd of installCommands) {
+                    try {
+                        const installOutput = await hypervisor.execCommand(vm.name, cmd);
+                        logger.info(`📦 Вывод установки: ${installOutput.substring(0, 500)}`);
+                    } catch (e) {
+                        logger.warn(`⚠️ Команда установки завершилась с предупреждением: ${cmd}`);
+                        logger.warn(`⚠️ Ошибка: ${e.message}`);
+                    }
+                }
+                logger.success('✅ Зависимости установлены');
+
+                // 5. Сборка приложения - 🔥 ИСПРАВЛЕНА ПРОБЛЕМА
+                await logStep(5, 6, `Сборка приложения ${framework}`, '🏗');
+                const buildCommands = this.getBuildCommands(framework);
+                
+                if (buildCommands.length > 0) {
+                    logger.info(`🔨 Команды сборки: ${buildCommands.join(' && ')}`);
+                    
+                    for (const cmd of buildCommands) {
+                        try {
+                            logger.info(`🔨 Выполнение: ${cmd}`);
+                            const buildOutput = await hypervisor.execCommand(vm.name, cmd);
+                            
+                            // Логируем вывод сборки (важно для отладки!)
+                            if (buildOutput && buildOutput.length > 0) {
+                                logger.info(`📋 Вывод сборки (${cmd}):`);
+                                // Разбиваем на строки и логируем по частям
+                                const lines = buildOutput.split('\n');
+                                for (const line of lines.slice(0, 50)) { // Первые 50 строк
+                                    if (line.trim()) {
+                                        logger.info(`   ${line}`);
+                                    }
+                                }
+                                if (lines.length > 50) {
+                                    logger.info(`   ... и еще ${lines.length - 50} строк`);
+                                }
+                            }
+                            
+                            // Проверяем наличие ошибок в выводе
+                            if (buildOutput.toLowerCase().includes('error') && !buildOutput.toLowerCase().includes('no errors')) {
+                                logger.warn('⚠️ В выводе сборки найдены предупреждения об ошибках');
+                            }
+                            
+                        } catch (e) {
+                            // 🔥 КРИТИЧЕСКАЯ ОШИБКА - не игнорируем для Next.js
+                            logger.error(`❌ Ошибка выполнения команды: ${cmd}`);
+                            logger.error(`❌ Детали ошибки: ${e.message}`);
+                            
+                            // Для Next.js ошибка сборки критична
+                            if (framework === 'nextjs') {
+                                throw new Error(`Сборка Next.js не удалась: ${e.message}`);
+                            }
+                            
+                            logger.warn(`⚠️ Сборка завершилась с предупреждением: ${cmd}`);
+                        }
+                    }
+                    
+                    // Проверяем результат сборки для Next.js
+                    if (framework === 'nextjs') {
+                        logger.info('🔍 Проверка результата сборки Next.js...');
+                        
+                        // Проверяем наличие папки .next
+                        const nextDirExists = await hypervisor.fileExists(vm.name, '/app/.next');
+                        logger.info(`📁 Папка .next существует: ${nextDirExists}`);
+                        
+                        if (!nextDirExists) {
+                            // Пробуем найти папку build (для других фреймворков)
+                            const buildDirExists = await hypervisor.fileExists(vm.name, '/app/build');
+                            logger.info(`📁 Папка build существует: ${buildDirExists}`);
+                            
+                            if (!buildDirExists) {
+                                logger.error('❌ Папка .next не создана! Сборка могла не завершиться успешно.');
+                                const dirList = await hypervisor.listDirectory(vm.name, '/app/');
+                                logger.error('📂 Содержимое /app/:', dirList);
+                            }
+                        } else {
+                            logger.success('✅ Папка .next создана успешно');
+                        }
+                    }
+                    
+                    logger.success('✅ Сборка завершена');
+                } else {
+                    logger.info('ℹ️ Сборка не требуется для этого фреймворка');
+                }
+
+                // 6. Запуск приложения
+                await logStep(6, 6, 'Настройка и запуск приложения', '🚀');
+                
+                const startCmd = this.getStartCommand(framework);
+                const startScript = `#!/bin/sh\n${startCmd}`;
+                
+                logger.info(`Команда запуска: ${startCmd.split('\n').pop()}`);
+                await hypervisor.execCommand(vm.name, `echo '${startScript}' > /app/start.sh`);
+                await hypervisor.execCommand(vm.name, 'chmod +x /app/start.sh');
+
+                const scriptExists = await hypervisor.fileExists(vm.name, '/app/start.sh');
+                if (!scriptExists) {
+                    throw new Error('Не удалось создать start.sh');
+                }
+
+                await hypervisor.updateContainerCommand(vm.name, ['/app/start.sh']);
+
+                logger.info('Перезапуск контейнера для применения настроек...');
+                await hypervisor.restartVM(vm.name);
+                
+                await new Promise(resolve => setTimeout(resolve, 8000));
+                
+                logger.success('✅ Приложение запущено');
             } else {
-                logger.info('GitHub URL не указан, пропуск деплоя приложения');
+                logger.info('ℹ️ GitHub URL не указан, пропуск деплоя.');
             }
             
-            // Даем время на запуск
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            
-            logger.info(`Деплой в Docker контейнере ${vm.name} завершен`);
+            logger.success(`🎉 Деплой ${vm.name} успешно завершен!`);
             return { success: true };
         } catch (error) {
-            logger.error('Ошибка деплоя в Docker:', error);
+            logger.error('❌ Ошибка деплоя:', error);
             return { success: false, error: error.message };
         }
     }
 
-    /**
-     * Ожидание запуска ВМ
-     */
     async waitForVM(vmName, timeout = 120000) {
         const startTime = Date.now();
         const checkInterval = 5000;
@@ -322,36 +753,25 @@ class VMManager {
         throw new Error(`Таймаут ожидания ВМ ${vmName} (${timeout}ms)`);
     }
 
-    /**
-     * Получить все ВМ
-     */
     async getAllVMs(projectId = null) {
         const where = {};
         if (projectId) {
             where.projectId = projectId;
         }
-        // Без фильтрации по статусу deleted (нет в ENUM)
         return await VM.findAll({ 
             where,
             order: [['createdAt', 'DESC']]
         });
     }
 
-    /**
-     * Получить ВМ по ID
-     */
     async getVM(id, projectId = null) {
         const where = { id };
         if (projectId) {
             where.projectId = projectId;
         }
-        // Без фильтрации по статусу deleted (нет в ENUM)
         return await VM.findOne({ where });
     }
 
-    /**
-     * Удалить ВМ (Hard Delete)
-     */
     async deleteVM(id, projectId = null) {
         const vm = await this.getVM(id, projectId);
         if (!vm) {
@@ -360,13 +780,38 @@ class VMManager {
 
         logger.info(`Удаление ВМ: ${vm.name}`);
 
+        // --- Remove from WireGuard peers ---
+        if (vm.wgPublicKey) {
+            try {
+                const peers = await VM.findAll({
+                    where: {
+                        projectId: vm.projectId,
+                        id: { [Op.ne]: vm.id },
+                        status: { [Op.or]: ['running', 'deployed'] }
+                    }
+                });
+                
+                for (const peer of peers) {
+                    try {
+                        logger.info(`Removing WireGuard peer from ${peer.name}...`);
+                        await hypervisor.execCommand(peer.name, `wg set wg0 peer ${vm.wgPublicKey} remove`);
+                        await hypervisor.execCommand(peer.name, 'wg-quick save wg0 || true');
+                    } catch (e) {
+                        logger.warn(`Failed to remove peer from ${peer.name}: ${e.message}`);
+                    }
+                }
+            } catch (e) {
+                logger.warn(`Error cleaning up WireGuard peers: ${e.message}`);
+            }
+        }
+        // -----------------------------------
+
         try {
             await hypervisor.deleteVM(vm.name);
         } catch (e) {
             logger.warn(`Ошибка удаления VM в гипервизоре: ${e.message}`);
         }
         
-        // Отключение SSH сессии
         if (vm.ip && config.MODE !== 'docker') {
             try {
                 ssh.disconnect(vm.ip);
@@ -375,16 +820,12 @@ class VMManager {
             }
         }
         
-        // Полное удаление из БД (hard delete)
         await vm.destroy();
         
         logger.success(`ВМ ${vm.name} удалена`);
         return true;
     }
 
-    /**
-     * Остановить ВМ
-     */
     async stopVM(id, projectId = null) {
         const vm = await this.getVM(id, projectId);
         if (!vm) {
@@ -402,9 +843,6 @@ class VMManager {
         return true;
     }
 
-    /**
-     * Запустить ВМ
-     */
     async startVM(id, projectId = null) {
         const vm = await this.getVM(id, projectId);
         if (!vm) {
@@ -415,18 +853,12 @@ class VMManager {
             throw new Error('ВМ уже запущена');
         }
 
-        if (config.MODE === 'docker') {
-            await hypervisor.startVM(vm.name);
+        await hypervisor.startVM(vm.name);
+        
+        if (config.MODE !== 'docker') {
+            await this.waitForVM(vm.name, 60000);
         } else {
-            await hypervisor.runCommand(`start ${vm.name}`);
-        }
-        
-        await this.waitForVM(vm.name, 60000);
-        
-        if (config.MODE === 'docker') {
-            if (vm.type === 'app') {
-                await this.startAppInDocker(vm);
-            }
+             await this.waitForVM(vm.name, 60000);
         }
 
         await vm.update({ status: 'running' });
@@ -435,9 +867,6 @@ class VMManager {
         return true;
     }
 
-    /**
-     * Перезапустить ВМ
-     */
     async restartVM(id, projectId = null) {
         const vm = await this.getVM(id, projectId);
         if (!vm) {
@@ -458,9 +887,6 @@ class VMManager {
         return true;
     }
 
-    /**
-     * Получить статус ВМ из гипервизора
-     */
     async getVMRealStatus(id, projectId = null) {
         const vm = await this.getVM(id, projectId);
         if (!vm) {
@@ -481,9 +907,6 @@ class VMManager {
         };
     }
 
-    /**
-     * Логирование использования ресурсов
-     */
     async logResourceUsage(vmId, cpuUsage, ramUsage) {
         return await ResourceLog.create({
             vmId,
@@ -493,12 +916,7 @@ class VMManager {
         });
     }
 
-    /**
-     * Получить статистику использования ресурсов ВМ
-     */
     async getVMResourceStats(vmId, hours = 24) {
-        // Если запрашивается статистика "прямо сейчас" (например, hours=0),
-        // можно попробовать вернуть текущие данные из Docker
         if (hours === 0 && config.MODE === 'docker') {
              const vm = await this.getVM(vmId);
              if (vm) {
@@ -538,179 +956,92 @@ class VMManager {
         };
     }
 
-        /**
-     * Создать бекап ВМ
-     */
-        async createBackup(vmId, name, projectId = null) {
-            const vm = await this.getVM(vmId, projectId);
-            if (!vm) {
-                throw new Error('ВМ не найдена или доступ запрещен');
-            }
-    
-            if (config.MODE !== 'docker') {
-                throw new Error('Бекапы поддерживаются только в режиме Docker');
-            }
-    
-            const timestamp = Date.now();
-            const backupName = `backup-${vm.name}-${timestamp}`;
-            
-            // ИСПРАВЛЕНО: Явный путь для бекапов. Убедитесь, что эта папка существует и доступна на запись.
-            const backupDir = config.BACKUP_DIR || '/var/backups/iaas';
-            
-            if (!fs.existsSync(backupDir)) {
-                fs.mkdirSync(backupDir, { recursive: true, mode: 0o755 });
-                logger.info(`Директория бекапов создана: ${backupDir}`);
-            }
-    
-            const volumeArchiveName = `${backupName}.tar.gz`;
-            const volumePath = path.join(backupDir, volumeArchiveName);
-            // Путь к данным ВМ на хосте
-            const diskPath = path.join(config.VM_STORAGE_DIR || '/tmp/vms', vm.name);
-            
-            const backup = await Backup.create({
-                vmId: vm.id,
-                name: name || `Backup ${new Date().toLocaleString()}`,
-                imageTag: backupName,
-                volumePath: volumePath, // Сохраняем полный путь в БД
-                status: 'creating'
-            });
-    
-            try {
-                // 1. Create Docker Image Backup
-                logger.info(`Создание образа контейнера ${backupName}...`);
-                await hypervisor.createBackup(vm.name, backupName);
-                
-                // 2. Create Volume Backup (tar.gz)
-                if (fs.existsSync(diskPath)) {
-                    logger.info(`Создание архива тома для ${vm.name}...`);
-                    
-                    await new Promise((resolve, reject) => {
-                        exec(`tar -czf "${volumePath}" -C "${diskPath}" .`, (err) => {
-                            if (err) {
-                                logger.error(`Ошибка tar: ${err.message}`);
-                                reject(err);
-                            } else {
-                                resolve();
-                            }
-                        });
-                    });
-    
-                    // ИСПРАВЛЕНО: Проверка, что файл действительно создан
-                    if (fs.existsSync(volumePath)) {
-                        const stats = fs.statSync(volumePath);
-                        await backup.update({ 
-                            status: 'ready',
-                            size: Math.round(stats.size / (1024 * 1024)) // Размер в МБ
-                        });
-                        logger.success(`Бекап тома создан: ${volumePath} (${Math.round(stats.size / 1024 / 1024)} MB)`);
-                    } else {
-                        throw new Error(`Файл бекапа не создан после выполнения tar: ${volumePath}`);
-                    }
-                } else {
-                    logger.warn(`Директория диска ВМ не найдена: ${diskPath}. Сохранен только образ контейнера.`);
-                    await backup.update({ status: 'ready' });
-                }
-    
-                return backup;
-            } catch (e) {
-                await backup.update({ status: 'error', error: e.message });
-                logger.error(`Backup failed: ${e.message}`);
-                // Удаляем частичные файлы при ошибке
-                if (fs.existsSync(volumePath)) {
-                    fs.unlinkSync(volumePath);
-                }
-                throw e;
-            }
-        }
-
-    /**
-     * Получить список бекапов
-     */
-    async getBackups(vmId, projectId = null) {
+    async createBackup(vmId, name, projectId = null) {
         const vm = await this.getVM(vmId, projectId);
-        if (!vm) {
-            throw new Error('ВМ не найдена или доступ запрещен');
+        if (!vm) throw new Error('ВМ не найдена');
+    
+        if (config.MODE !== 'docker') throw new Error('Бекапы поддерживаются только в режиме Docker');
+    
+        const timestamp = Date.now();
+        const backupName = `backup-${vm.name}-${timestamp}`;
+        const backupDir = config.BACKUP_DIR || '/app/data/backups';
+        
+        if (!fs.existsSync(backupDir)) {
+            fs.mkdirSync(backupDir, { recursive: true, mode: 0o755 });
         }
-
-        return await Backup.findAll({
-            where: { vmId },
-            order: [['createdAt', 'DESC']]
+    
+        const volumeArchiveName = `${backupName}.tar`;
+        const volumePath = path.join(backupDir, volumeArchiveName);
+        const volumeName = vm.name;
+        
+        const backup = await Backup.create({
+            vmId: vm.id,
+            name: name || `Backup ${new Date().toLocaleString()}`,
+            imageTag: backupName,
+            volumePath: volumePath,
+            volumeName: volumeName,
+            status: 'creating'
         });
+    
+        try {
+            await hypervisor.createBackup(vm.name, backupName);
+            await hypervisor.createVolumeBackup(volumeName, volumePath);
+    
+            if (fs.existsSync(volumePath)) {
+                const stats = fs.statSync(volumePath);
+                await backup.update({ 
+                    status: 'ready',
+                    size: Math.round(stats.size / (1024 * 1024))
+                });
+            } else {
+                throw new Error(`Файл бекапа не создан: ${volumePath}`);
+            }
+    
+            return backup;
+        } catch (e) {
+            await backup.update({ status: 'error', error: e.message });
+            if (fs.existsSync(volumePath)) fs.unlinkSync(volumePath);
+            throw e;
+        }
     }
 
-    /**
-     * Восстановить из бекапа
-     */
+    async getBackups(vmId, projectId = null) {
+        const vm = await this.getVM(vmId, projectId);
+        if (!vm) throw new Error('ВМ не найдена');
+        return await Backup.findAll({ where: { vmId }, order: [['createdAt', 'DESC']] });
+    }
+
     async restoreBackup(vmId, backupId, projectId = null) {
         const vm = await this.getVM(vmId, projectId);
         if (!vm) throw new Error('ВМ не найдена');
 
         const backup = await Backup.findByPk(backupId);
         if (!backup || backup.vmId !== vmId) throw new Error('Бекап не найден');
-
         if (config.MODE !== 'docker') throw new Error('Только Docker режим');
 
-        // ИСПРАВЛЕНО: Используем 'deploying' вместо 'restoring'
         await vm.update({ status: 'deploying' });
         logger.info(`Начало восстановления ВМ ${vm.name} из бекапа ${backup.name}...`);
 
         try {
-            // 1. Остановка ВМ
-            try {
-                await this.stopVM(vmId, projectId);
-            } catch (e) {
-                logger.warn(`ВМ не была остановлена (возможно уже остановлена): ${e.message}`);
-            }
+            try { await this.stopVM(vmId, projectId); } catch (e) { logger.warn(e.message); }
 
-            // 2. Удаление текущего контейнера
             try {
                 await hypervisor.ensureConnection();
                 const containers = await hypervisor.docker.listContainers({ all: true, filters: { name: [vm.name] } });
                 if (containers.length > 0) {
                     const container = hypervisor.docker.getContainer(vm.name);
                     await container.remove({ force: true });
-                    logger.info(`Старый контейнер ${vm.name} удален`);
                 }
-            } catch (e) {
-                logger.warn(`Ошибка при удалении контейнера: ${e.message}`);
+            } catch (e) { logger.warn(e.message); }
+
+            const volumeName = vm.name;
+
+            if (backup.volumePath && fs.existsSync(backup.volumePath)) {
+                await hypervisor.restoreVolumeBackup(volumeName, backup.volumePath);
             }
 
-            const diskPath = path.join(config.VM_STORAGE_DIR || '/tmp/vms', vm.name);
-
-            // 3. Восстановление данных тома
-            // ИСПРАВЛЕНО: Подробная проверка пути
-            if (backup.volumePath) {
-                logger.info(`Проверка пути к бекапу: ${backup.volumePath}`);
-                
-                if (fs.existsSync(backup.volumePath)) {
-                    logger.info(`Восстановление данных тома из ${backup.volumePath}...`);
-                    
-                    if (fs.existsSync(diskPath)) {
-                        fs.rmSync(diskPath, { recursive: true, force: true });
-                    }
-                    fs.mkdirSync(diskPath, { recursive: true });
-
-                    await new Promise((resolve, reject) => {
-                        exec(`tar -xzf "${backup.volumePath}" -C "${diskPath}"`, (err) => {
-                            if (err) reject(err);
-                            else resolve();
-                        });
-                    });
-                    logger.success(`Данные тома восстановлены в ${diskPath}`);
-                } else {
-                    // Это теперь будет четкая ошибка, а не тихий пропуск
-                    logger.error(`Файл бекапа отсутствует на диске: ${backup.volumePath}`);
-                    throw new Error(`Файл бекапа не найден: ${backup.volumePath}. Проверьте права доступа или наличие файла.`);
-                }
-            } else {
-                logger.warn('Путь к тому не указан в бекапе');
-            }
-
-            // 4. Обновление конфигурации ВМ
             await vm.update({ dockerImage: backup.imageTag, type: 'docker' });
 
-            // 5. Пересоздание ВМ
-            logger.info(`Создание контейнера из образа ${backup.imageTag}...`);
             await hypervisor.createVM({
                 name: vm.name,
                 type: 'docker',
@@ -718,20 +1049,12 @@ class VMManager {
                 framework: vm.framework,
                 ram: vm.ram,
                 cpu: vm.cpu,
-                diskPath,
+                diskPath: volumeName,
                 hostPort: vm.hostPort,
-                network: config.VM_NETWORK || 'default'
+                network: config.VM_NETWORK || 'app-network'
             });
 
-            // 6. Ожидание запуска
-            logger.info(`Ожидание запуска ВМ после восстановления...`);
-            try {
-                await this.waitForVM(vm.name, 60000);
-            } catch (waitErr) {
-                logger.error(`ВМ не запустилась после восстановления: ${waitErr.message}`);
-                throw new Error(`Контейнер создан, но не запустился: ${waitErr.message}`);
-            }
-
+            await this.waitForVM(vm.name, 60000);
             await vm.update({ status: 'running' });
             logger.success(`ВМ ${vm.name} успешно восстановлена из бекапа`);
             return true;
@@ -743,47 +1066,31 @@ class VMManager {
         }
     }
 
-    /**
-     * Изменить ресурсы ВМ
-     */
     async resizeVM(vmId, ram, cpu, projectId = null) {
         const vm = await this.getVM(vmId, projectId);
         if (!vm) throw new Error('ВМ не найдена');
 
         logger.info(`Изменение ресурсов ВМ ${vm.name}: RAM ${ram}MB, CPU ${cpu}`);
-
-        // Update DB
         await vm.update({ ram, cpu });
 
         if (config.MODE === 'docker') {
-            // Try dynamic update
             try {
                 await hypervisor.updateContainerResources(vm.name, ram, cpu);
             } catch (e) {
-                logger.warn(`Не удалось обновить ресурсы на лету, требуется перезагрузка: ${e.message}`);
-                // Optional: Force restart if dynamic update fails?
-                // For now, just warn.
+                logger.warn(`Не удалось обновить ресурсы на лету: ${e.message}`);
             }
         }
         
         return vm;
     }
 
-    /**
-     * Проверить подключение к гипервизору
-     */
     async checkHypervisorConnection() {
         return await hypervisor.checkConnection();
     }
 
-    /**
-     * Получить логи ВМ
-     */
     async getLogs(id, projectId = null) {
         const vm = await this.getVM(id, projectId);
-        if (!vm) {
-            throw new Error('ВМ не найдена или доступ запрещен');
-        }
+        if (!vm) throw new Error('ВМ не найдена');
 
         if (config.MODE === 'docker') {
             return await hypervisor.getLogs(vm.name);
@@ -793,9 +1100,6 @@ class VMManager {
         }
     }
 
-    /**
-     * Получить информацию о режиме работы
-     */
     getModeInfo() {
         return {
             mode: config.MODE,

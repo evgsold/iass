@@ -294,13 +294,82 @@ body {
     line-height: 1.5;
 }
 
-.project-card-role {
-    font-size: 0.8rem;
+.project-card-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: auto;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border-color);
+}
+
+.resource-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.85rem;
     color: var(--text-secondary);
     background: #f3f4f6;
-    display: inline-block;
-    padding: 2px 8px;
+    padding: 4px 8px;
     border-radius: 4px;
+}
+
+.project-date {
+    font-size: 0.8rem;
+    color: #9ca3af;
+}
+
+.project-icon-wrapper {
+    background: #e0e7ff;
+    padding: 10px;
+    border-radius: 8px;
+    color: var(--primary-color);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.empty-state-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    border-style: dashed;
+    text-align: center;
+    cursor: pointer;
+    min-height: 200px;
+}
+
+.empty-state-card:hover {
+    border-color: var(--primary-color);
+    background-color: #f9fafb;
+}
+
+.empty-state-icon {
+    background: #f3f4f6;
+    padding: 1rem;
+    border-radius: 50%;
+    margin-bottom: 1rem;
+    color: #9ca3af;
+}
+
+.empty-state-card h3 {
+    margin: 0 0 0.5rem 0;
+    font-size: 1.1rem;
+    color: var(--text-primary);
+}
+
+.empty-state-card p {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.modal-subtitle {
+    margin-top: -1rem;
+    margin-bottom: 1.5rem;
+    color: var(--text-secondary);
+    font-size: 0.95rem;
 }
 
 /* Project Details / VM List */

@@ -1,4 +1,3 @@
-// server/services/hypervisor/docker.js
 const Docker = require('dockerode');
 const fs = require('fs');
 const path = require('path');
@@ -12,7 +11,6 @@ class DockerService {
         this.docker = null;
     }
 
-    // ✅ Гарантируем инициализацию перед каждым вызовом
     async ensureConnection() {
         if (!this.connected || !this.docker) {
             await this.checkConnection();
@@ -20,6 +18,7 @@ class DockerService {
         if (!this.docker) {
             throw new Error('Docker не подключен. Проверьте, что /var/run/docker.sock доступен.');
         }
+        return this.docker;
     }
 
     async checkConnection() {
@@ -39,20 +38,28 @@ class DockerService {
 
     async createDisk(vmName, sizeGB) {
         await this.ensureConnection();
+        const volumeName = vmName;
         
-        const diskPath = path.join(config.VM_STORAGE_DIR || '/tmp/vms', vmName);
-        
-        if (!fs.existsSync(diskPath)) {
-            fs.mkdirSync(diskPath, { recursive: true, mode: 0o777 });
-            logger.info(`Директория создана: ${diskPath}`);
+        try {
+            await this.docker.getVolume(volumeName).inspect();
+            logger.info(`Том ${volumeName} уже существует`);
+        } catch (e) {
+            await this.docker.createVolume({
+                Name: volumeName,
+                Driver: 'local',
+                Labels: {
+                    'iaas.vm': vmName,
+                    'iaas.created': new Date().toISOString()
+                }
+            });
+            logger.info(`Том ${volumeName} создан`);
         }
         
-        return diskPath;
+        return volumeName;
     }
 
     async runCommand(cmd) {
         await this.ensureConnection();
-        
         return new Promise((resolve, reject) => {
             exec(`docker ${cmd}`, { timeout: 30000 }, (err, stdout, stderr) => {
                 if (err) reject(new Error(stderr || err.message));
@@ -65,9 +72,9 @@ class DockerService {
         await this.ensureConnection();
         
         let imageName;
-        let cmd = undefined;
+        let cmd = vmConfig.cmd;
         let privileged = false;
-        let env = [];
+        let env = ['PORT=3000', 'HOST=0.0.0.0', 'NODE_ENV=production'];
 
         if (vmConfig.type === 'k8s') {
             imageName = 'rancher/k3s:latest';
@@ -75,23 +82,36 @@ class DockerService {
             privileged = true;
             env = ['K3S_KUBECONFIG_OUTPUT=/output/kubeconfig.yaml', 'K3S_KUBECONFIG_MODE=666'];
         } else if (vmConfig.type === 'app') {
-            // App VMs always need to stay alive for manual start
-            cmd = ['sh', '-c', 'while :; do sleep 1; done'];
             if (vmConfig.dockerImage) {
                 imageName = vmConfig.dockerImage;
             } else {
                 const frameworks = {
                     'node': 'node:25',
-                    'python': 'python:3.10',
-                    'go': 'golang:1.21'
+                    'python': 'python:3.11',
+                    'go': 'golang:1.21',
+                    'nextjs': 'node:25',
+                    'react-cra': 'node:25',
+                    'react-vite': 'node:25',
+                    'vue': 'node:25',
+                    'angular': 'node:25',
+                    'nuxt': 'node:25',
+                    'svelte': 'node:25',
+                    'sveltekit': 'node:25',
+                    'nest': 'node:25',
+                    'express': 'node:25',
+                    'django': 'python:3.11',
+                    'flask': 'python:3.11',
+                    'rust': 'rust:latest',
+                    'php': 'php:8.2'
                 };
                 imageName = frameworks[vmConfig.framework] || 'node:25';
             }
+            if (!cmd) {
+                cmd = ['sh', '-c', 'while :; do sleep 1; done'];
+            }
         } else {
-            // Docker type
             if (vmConfig.dockerImage) {
                 imageName = vmConfig.dockerImage;
-                // Only override CMD if it looks like a base OS image that would exit immediately
                 if (imageName.match(/^(ubuntu|alpine|debian|centos)(:|$)/)) {
                     cmd = ['sh', '-c', 'while :; do sleep 1; done'];
                 }
@@ -101,7 +121,6 @@ class DockerService {
             }
         }
         
-        // Проверяем и скачиваем образ через API
         let imageExists = false;
         try {
             await this.docker.getImage(imageName).inspect();
@@ -109,8 +128,6 @@ class DockerService {
         } catch (e) {
             logger.info(`Образ ${imageName} не найден, скачивание...`);
         }
-
-        
 
         if (!imageExists) {
             await new Promise((resolve, reject) => {
@@ -125,41 +142,41 @@ class DockerService {
             logger.success(`Образ ${imageName} загружен`);
         }
 
-        const absoluteDiskPath = path.resolve(vmConfig.diskPath);
-
-        if (!fs.existsSync(absoluteDiskPath)) {
-            fs.mkdirSync(absoluteDiskPath, { recursive: true, mode: 0o777 });
-            logger.info(`Директория тома ВМ создана: ${absoluteDiskPath}`);
-        }
-        
+        const volumeName = vmConfig.diskPath;
 
         const container = await this.docker.createContainer({
             Image: imageName,
             name: vmConfig.name,
             Cmd: cmd,
             Env: env,
-            Tty: true, // Включаем TTY для корректного отображения логов
+            Tty: true,
             HostConfig: {
                 PortBindings: {
                     '3000/tcp': [{ HostPort: String(vmConfig.hostPort) }],
-                    // For K3s, we might need to expose 6443
                     ...(vmConfig.type === 'k8s' ? { '6443/tcp': [{ HostPort: String(vmConfig.hostPort + 10000) }] } : {})
                 },
-                Binds: [`${absoluteDiskPath}:/app`],
+                Mounts: [
+                    {
+                        Type: 'volume',
+                        Source: volumeName,
+                        Target: '/app',
+                        ReadOnly: false
+                    }
+                ],
                 Privileged: privileged,
                 RestartPolicy: {
                     Name: 'unless-stopped'
                 },
-                // Set resource limits if provided
                 ...(vmConfig.ram ? { Memory: vmConfig.ram * 1024 * 1024 } : {}),
                 ...(vmConfig.cpu ? { NanoCpus: vmConfig.cpu * 1000000000 } : {}),
                 LogConfig: {
                     Type: 'json-file',
                     Config: {
-                        'max-size': '10m',
-                        'max-file': '3'
+                        'max-size': '50m',
+                        'max-file': '5'
                     }
-                }
+                },
+                NetworkMode: vmConfig.network || 'app-network'
             },
             WorkingDir: '/app'
         });
@@ -169,27 +186,148 @@ class DockerService {
         return true;
     }
 
-    async execCommand(vmName, cmd) {
+    async updateContainerCommand(vmName, newCmd) {
+        await this.ensureConnection();
+        try {
+            const container = this.docker.getContainer(vmName);
+            
+            await container.update({
+                Cmd: newCmd
+            });
+            
+            logger.info(`Команда контейнера ${vmName} обновлена на: ${newCmd.join(' ')}`);
+            return true;
+        } catch (e) {
+            logger.error(`Ошибка обновления команды контейнера ${vmName}:`, e.message);
+            throw e;
+        }
+    }
+
+    async execCommand(vmName, cmd, timeout = 300000) { // 🔥 Увеличен таймаут до 5 минут
         await this.ensureConnection();
         const container = this.docker.getContainer(vmName);
         
         const exec = await container.exec({
             Cmd: ['sh', '-c', cmd],
             AttachStdout: true,
-            AttachStderr: true
+            AttachStderr: true,
+            Tty: false
         });
 
-        const stream = await exec.start({ hijack: true, stdin: true });
+        const stream = await exec.start({ hijack: true, stdin: false });
         
         return new Promise((resolve, reject) => {
             let output = '';
-            container.modem.demuxStream(stream, process.stdout, process.stderr);
-            stream.on('data', chunk => output += chunk.toString());
-            stream.on('end', () => resolve(output));
-            stream.on('error', err => reject(err));
+            
+            stream.on('data', chunk => {
+                output += chunk.toString('utf8');
+            });
+            
+            stream.on('end', () => {
+                const cleanOutput = output.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '').trim();
+                resolve(cleanOutput);
+            });
+            
+            stream.on('error', err => {
+                reject(err);
+            });
+            
+            // 🔥 Увеличенный таймаут для длительных операций (сборка)
+            setTimeout(() => {
+                stream.destroy();
+                reject(new Error(`Timeout executing command: ${cmd} (${timeout}ms)`));
+            }, timeout);
         });
     }
 
+    /**
+     * ✅ ПРЯМАЯ ПРОВЕРКА: Проверяет наличие файла через Docker API
+     */
+    async fileExists(vmName, filePath) {
+        await this.ensureConnection();
+        try {
+            const container = this.docker.getContainer(vmName);
+            
+            // Пытаемся получить архив с файлом - если файл есть, успех
+            const archive = await container.getArchive({ path: filePath });
+            
+            return new Promise((resolve) => {
+                let hasData = false;
+                archive.on('data', (chunk) => {
+                    if (chunk && chunk.length > 0) {
+                        hasData = true;
+                    }
+                });
+                archive.on('end', () => {
+                    resolve(hasData);
+                });
+                archive.on('error', () => {
+                    resolve(false);
+                });
+            });
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /**
+     * ✅ ПРЯМОЕ ЧТЕНИЕ: Читает содержимое файла через Docker API
+     */
+    async readFile(vmName, filePath) {
+        await this.ensureConnection();
+        const container = this.docker.getContainer(vmName);
+        
+        try {
+            // Получаем архив с файлом
+            const archive = await container.getArchive({ path: filePath });
+            
+            return new Promise((resolve, reject) => {
+                const chunks = [];
+                
+                archive.on('data', (chunk) => {
+                    chunks.push(chunk);
+                });
+                
+                archive.on('end', async () => {
+                    try {
+                        // Объединяем чанки
+                        const buffer = Buffer.concat(chunks);
+                        
+                        // TAR-архив имеет 512-байтовый заголовок
+                        // Пропускаем заголовок и получаем содержимое файла
+                        const headerSize = 512;
+                        // Выравниваем по 512 байт
+                        const contentStart = headerSize;
+                        const content = buffer.slice(contentStart).toString('utf8').trim();
+                        
+                        resolve(content);
+                    } catch (parseErr) {
+                        reject(parseErr);
+                    }
+                });
+                
+                archive.on('error', (err) => {
+                    reject(err);
+                });
+            });
+        } catch (e) {
+            throw new Error(`Не удалось прочитать файл ${filePath}: ${e.message}`);
+        }
+    }
+
+    /**
+     * Получает список файлов в директории через Docker API
+     */
+    async listDirectory(vmName, dirPath) {
+        await this.ensureConnection();
+        try {
+            // Используем ls через exec для списка файлов
+            const result = await this.execCommand(vmName, `ls -la ${dirPath}`);
+            return result;
+        } catch (e) {
+            throw new Error(`Не удалось получить список файлов: ${e.message}`);
+        }
+    }
     async getVMStatus(vmName) {
         await this.ensureConnection();
         
@@ -209,7 +347,6 @@ class DockerService {
             await container.start();
             logger.success(`Контейнер ${vmName} запущен`);
         } catch (e) {
-            // Ignore if already started
             if (e.message.includes('already started')) return;
             throw e;
         }
@@ -227,6 +364,18 @@ class DockerService {
         }
     }
 
+    async restartVM(vmName) {
+        await this.ensureConnection();
+        try {
+            const container = this.docker.getContainer(vmName);
+            await container.restart();
+            logger.info(`Контейнер ${vmName} перезапущен`);
+        } catch (e) {
+            logger.error(`Ошибка рестарта: ${e.message}`);
+            throw e;
+        }
+    }
+
     async deleteVM(vmName) {
         await this.ensureConnection();
         
@@ -234,21 +383,26 @@ class DockerService {
             const container = this.docker.getContainer(vmName);
             await container.stop().catch(() => {});
             await container.remove();
+            logger.info(`Контейнер ${vmName} удален`);
         } catch (e) {
-            logger.warn(`Ошибка удаления: ${e.message}`);
+            logger.warn(`Ошибка удаления контейнера: ${e.message}`);
         }
         
-        const diskPath = path.join(config.VM_STORAGE_DIR || '/tmp/vms', vmName);
-        if (fs.existsSync(diskPath)) {
-            fs.rmSync(diskPath, { recursive: true, force: true });
+        try {
+            const volume = this.docker.getVolume(vmName);
+            await volume.remove();
+            logger.info(`Том ${vmName} удален`);
+        } catch (e) {
+            logger.warn(`Ошибка удаления тома: ${e.message}`);
         }
         
-        logger.success(`Контейнер ${vmName} удален`);
+        logger.success(`ВМ ${vmName} полностью удалена`);
     }
 
     async getVMIP(vmName) {
         return '127.0.0.1';
     }
+
     async getLogs(vmName) {
         await this.ensureConnection();
         try {
@@ -256,7 +410,7 @@ class DockerService {
             const logs = await container.logs({
                 stdout: true,
                 stderr: true,
-                tail: 100,
+                tail: 200,
                 timestamps: true
             });
             return logs.toString('utf8');
@@ -273,7 +427,7 @@ class DockerService {
             
             if (ramMB) {
                 updateConfig.Memory = ramMB * 1024 * 1024;
-                updateConfig.MemorySwap = -1; // Unlimited swap or match memory
+                updateConfig.MemorySwap = -1;
             }
             
             if (cpuCores) {
@@ -294,8 +448,6 @@ class DockerService {
         try {
             const container = this.docker.getContainer(vmName);
             
-            // Commit the container to a new image
-            // pause: true ensures the container is paused during commit for consistency
             const data = await container.commit({
                 repo: backupName,
                 comment: `Backup of ${vmName} at ${new Date().toISOString()}`,
@@ -304,7 +456,7 @@ class DockerService {
             });
             
             logger.success(`Бекап (образ) создан: ${backupName} (${data.Id})`);
-            return data.Id; // Return the Image ID
+            return data.Id;
         } catch (e) {
             logger.error(`Ошибка создания бекапа для ${vmName}:`, e.message);
             throw e;
@@ -319,7 +471,91 @@ class DockerService {
             logger.success(`Бекап (образ) удален: ${imageName}`);
         } catch (e) {
             logger.warn(`Ошибка удаления бекапа ${imageName}:`, e.message);
-            // Don't throw if it doesn't exist
+        }
+    }
+
+    async createVolumeBackup(volumeName, backupPath) {
+        await this.ensureConnection();
+        
+        try {
+            const tempContainer = await this.docker.createContainer({
+                Image: 'node:20',
+                Cmd: ['sleep', '3600'],
+                HostConfig: {
+                    Mounts: [
+                        {
+                            Type: 'volume',
+                            Source: volumeName,
+                            Target: '/data',
+                            ReadOnly: true
+                        }
+                    ]
+                }
+            });
+
+            await tempContainer.start();
+            const archive = await tempContainer.getArchive({ path: '/data' });
+            const writeStream = require('fs').createWriteStream(backupPath);
+            
+            await new Promise((resolve, reject) => {
+                archive.pipe(writeStream);
+                archive.on('end', resolve);
+                archive.on('error', reject);
+                writeStream.on('finish', resolve);
+                writeStream.on('error', reject);
+            });
+
+            await tempContainer.stop();
+            await tempContainer.remove();
+
+            logger.success(`Архив тома создан: ${backupPath}`);
+            return true;
+        } catch (error) {
+            logger.error(`Ошибка создания архива тома: ${error.message}`);
+            throw error;
+        }
+    }
+
+    async restoreVolumeBackup(volumeName, backupPath) {
+        await this.ensureConnection();
+        
+        try {
+            const fs = require('fs');
+            
+            if (!fs.existsSync(backupPath)) {
+                throw new Error(`Файл бекапа не найден: ${backupPath}`);
+            }
+
+            const tempContainer = await this.docker.createContainer({
+                Image: 'node:20',
+                Cmd: ['sleep', '3600'],
+                HostConfig: {
+                    Mounts: [
+                        {
+                            Type: 'volume',
+                            Source: volumeName,
+                            Target: '/data',
+                            ReadOnly: false
+                        }
+                    ]
+                }
+            });
+
+            await tempContainer.start();
+
+            await tempContainer.putArchive(
+                require('fs').createReadStream(backupPath),
+                { path: '/data' }
+            );
+
+            await tempContainer.stop();
+            await tempContainer.remove();
+
+            logger.success(`Том восстановлен из: ${backupPath}`);
+            return true;
+        } catch (error) {
+            logger.error(`Ошибка восстановления тома: ${error.message}`);
+            throw error;
         }
     }
 
@@ -329,15 +565,12 @@ class DockerService {
             const container = this.docker.getContainer(vmName);
             const stats = await container.stats({ stream: false });
             
-            // Calculate CPU usage
             let cpuUsage = 0.0;
             
-            // Проверяем наличие статистики процессора
             if (stats.cpu_stats && stats.precpu_stats && stats.cpu_stats.cpu_usage && stats.precpu_stats.cpu_usage) {
                 const cpuDelta = stats.cpu_stats.cpu_usage.total_usage - stats.precpu_stats.cpu_usage.total_usage;
                 const systemCpuDelta = stats.cpu_stats.system_cpu_usage - stats.precpu_stats.system_cpu_usage;
                 
-                // Fallback если online_cpus отсутствует
                 const numberCpus = stats.cpu_stats.online_cpus || 
                                  (stats.cpu_stats.cpu_usage.percpu_usage ? stats.cpu_stats.cpu_usage.percpu_usage.length : 1);
 
@@ -346,11 +579,9 @@ class DockerService {
                 }
             }
 
-            // Calculate Memory usage
             let usedMemory = 0;
             if (stats.memory_stats && stats.memory_stats.usage) {
                 usedMemory = stats.memory_stats.usage;
-                // Вычитаем кэш, как это делает docker stats
                 if (stats.memory_stats.stats) {
                     if (typeof stats.memory_stats.stats.cache !== 'undefined') {
                         usedMemory -= stats.memory_stats.stats.cache;
@@ -366,9 +597,24 @@ class DockerService {
                 ram: isNaN(memoryUsageMB) ? 0 : parseFloat(memoryUsageMB.toFixed(2))
             };
         } catch (e) {
-            // logger.error(`Ошибка получения статистики для ${vmName}:`, e.message);
             return null;
         }
+    }
+
+    async volumeExists(volumeName) {
+        await this.ensureConnection();
+        try {
+            await this.docker.getVolume(volumeName).inspect();
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    async listVolumes() {
+        await this.ensureConnection();
+        const volumes = await this.docker.listVolumes();
+        return volumes.Volumes || [];
     }
 }
 

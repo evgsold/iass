@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../api';
-import { Plus, Folder, MoreHorizontal } from 'lucide-react';
+import { Plus, Folder, MoreHorizontal, Server, Box, Layers } from 'lucide-react';
 import { toast } from 'react-toastify';
 
 const Dashboard = () => {
@@ -35,14 +35,25 @@ const Dashboard = () => {
     }
   };
 
+  // Helper to count resources (mock logic, ideally backend returns counts)
+  const getResourceCount = (project) => {
+      // This assumes project.vms is populated, which might require backend update or separate call
+      // For now, we just show a placeholder or if the API returns it
+      return project.vms ? project.vms.length : 0;
+  };
+
   return (
     <div className="dashboard-content">
       <div className="dashboard-header">
-        <h1 className="dashboard-title">Projects</h1>
+        <div>
+            <h1 className="dashboard-title">Projects</h1>
+            <p className="text-secondary" style={{ marginTop: '5px' }}>Manage your cloud infrastructure projects.</p>
+        </div>
         <button
           onClick={() => setShowModal(true)}
           className="btn-create"
         >
+          <Plus size={18} style={{ marginRight: '8px' }} />
           Create Project
         </button>
       </div>
@@ -55,26 +66,44 @@ const Dashboard = () => {
             className="project-card"
           >
             <div className="project-card-header">
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <div style={{ background: '#e0e7ff', padding: '8px', borderRadius: '6px' }}>
-                    <Folder className="project-card-icon" size={20} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <div className="project-icon-wrapper">
+                    <Folder className="project-card-icon" size={24} />
                 </div>
-                <h2 className="project-card-title">{project.name}</h2>
+                <div>
+                    <h2 className="project-card-title">{project.name}</h2>
+                    <span className="project-card-role">
+                        {project.users?.[0]?.ProjectUser?.role || 'Owner'}
+                    </span>
+                </div>
               </div>
-              <MoreHorizontal size={16} color="#9ca3af" />
+              <button className="icon-btn">
+                <MoreHorizontal size={20} />
+              </button>
             </div>
+            
             <p className="project-card-description">{project.description || 'No description provided.'}</p>
-            <div className="project-card-role">
-              {project.users?.[0]?.ProjectUser?.role || 'Owner'}
+            
+            <div className="project-card-footer">
+                <div className="resource-badge">
+                    <Server size={14} />
+                    <span>{project.vms?.length || 0} Resources</span>
+                </div>
+                <div className="project-date">
+                    Updated {new Date(project.updatedAt).toLocaleDateString()}
+                </div>
             </div>
           </Link>
         ))}
         
         {/* Empty state or "Create" card */}
         {projects.length === 0 && (
-            <div className="project-card" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderStyle: 'dashed' }} onClick={() => setShowModal(true)}>
-                <Plus size={32} color="#d1d5db" />
-                <p style={{ color: '#6b7280', marginTop: '10px' }}>Create your first project</p>
+            <div className="project-card empty-state-card" onClick={() => setShowModal(true)}>
+                <div className="empty-state-icon">
+                    <Plus size={32} />
+                </div>
+                <h3>Create your first project</h3>
+                <p>Organize your resources and collaborate with your team.</p>
             </div>
         )}
       </div>
@@ -83,6 +112,7 @@ const Dashboard = () => {
         <div className="modal-overlay">
           <div className="modal-card">
             <h2 className="modal-title">Create New Project</h2>
+            <p className="modal-subtitle">Projects help you organize your resources.</p>
             <form onSubmit={handleCreateProject}>
               <div className="modal-form-group">
                 <label className="modal-form-label">Name</label>
@@ -92,16 +122,18 @@ const Dashboard = () => {
                   value={newProject.name}
                   onChange={(e) => setNewProject({ ...newProject, name: e.target.value })}
                   required
-                  placeholder="My Awesome Project"
+                  placeholder="e.g. My Startup, Client X"
+                  autoFocus
                 />
               </div>
               <div className="modal-form-group">
-                <label className="modal-form-label">Description</label>
+                <label className="modal-form-label">Description (Optional)</label>
                 <textarea
                   className="modal-form-textarea"
                   value={newProject.description}
                   onChange={(e) => setNewProject({ ...newProject, description: e.target.value })}
                   placeholder="What is this project about?"
+                  rows={3}
                 />
               </div>
               <div className="modal-actions">

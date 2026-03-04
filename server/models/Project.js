@@ -21,6 +21,10 @@ const Project = sequelize.define('Project', {
             model: 'Users',
             key: 'id'
         }
+    },
+    networkCidr: {
+        type: DataTypes.STRING,
+        allowNull: true
     }
 });
 

@@ -34,22 +34,24 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       SSH_KEY_PATH: /app/server/.ssh/id_rsa
       NODE_ENV: development
+      VM_STORAGE_DIR: /app/data/vms
+      BACKUP_DIR: /app/data/backups
+      MODE: docker
+      DOCKER_HOST: unix:///var/run/docker.sock
+      VM_NETWORK: app-network
     depends_on:
       postgres:
         condition: service_healthy
     ports:
       - "5001:5000"
     volumes:
-      - ./data/vms:/app/data/vms
-      # Монтируем директорию с бекапами
+      - vm-storage:/app/data/vms
       - ./data/backups:/app/data/backups
       - ./server/.ssh:/app/server/.ssh:ro
-      # ✅ Пробрасываем Docker socket (для macOS Docker Desktop)
       - /var/run/docker.sock:/var/run/docker.sock
-      # ✅ Папка для ВМ должна быть доступна Docker Desktop
-      - ./vms:/tmp/vms
     networks:
       - app-network
+    privileged: true
 
   client:
     build:
@@ -102,6 +104,7 @@ services:
 
 volumes:
   pgdata:
+  vm-storage:
 
 networks:
   app-network:
