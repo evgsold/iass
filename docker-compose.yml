@@ -88,6 +88,7 @@ services:
       DB_NAME: ${DB_NAME}
       API_SERVICE_URL: http://server:5000
       FRONTEND_SERVICE_URL: http://client:80
+      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL}
       VM_HOST: host.docker.internal
       NODE_ENV: production
     ports:
